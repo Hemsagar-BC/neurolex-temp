@@ -1,6 +1,6 @@
 // AI Handwriting Error Detection Page
 // Students upload handwritten work → system detects dyslexia-related writing issues
-// Uses GROQ vision API via backend for analysis
+// Uses Gemini vision API via backend for analysis
 
 import React, { useState, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -139,8 +139,8 @@ export default function HandwritingPage() {
                             onDragLeave={handleDragLeave}
                             onClick={() => fileInputRef.current?.click()}
                             className={`relative rounded-2xl border-2 border-dashed p-8 text-center cursor-pointer transition-all ${dragActive
-                                    ? 'border-purple-400 bg-purple-500/10'
-                                    : 'border-white/20 bg-white/5 hover:border-white/40'
+                                ? 'border-purple-400 bg-purple-500/10'
+                                : 'border-white/20 bg-white/5 hover:border-white/40'
                                 }`}
                             style={{ minHeight: '250px' }}
                         >

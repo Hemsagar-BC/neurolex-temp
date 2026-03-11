@@ -56,7 +56,10 @@ export default function AnalyticsPage() {
 
     useEffect(() => {
         async function loadStats() {
-            if (!user) return;
+            if (!user) {
+                setLoading(false);
+                return;
+            }
             try {
                 const data = await getUserStats(user.uid);
                 setStats(data);

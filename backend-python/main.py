@@ -83,18 +83,18 @@ class LectureUpdate(BaseModel):
     mindMap: str = None
     summary: str = None
 
-# GROQ AI API Configuration
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")  # Load from environment variable
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.3-70b-versatile"  # Updated to current model
+# Google Gemini API Configuration (native REST API)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")  # Gemini API key
+GEMINI_MODEL = "gemini-2.5-flash"  # Gemini model for text and vision
+GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
 @app.get("/")
 async def root():
-    return {"message": "SimplifiED Backend with Grok AI", "status": "running"}
+    return {"message": "SimplifiED Backend with Gemini AI", "status": "running"}
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "groq_model": GROQ_MODEL}
+    return {"status": "ok", "model": GEMINI_MODEL}
 
 def chunk_text(text: str, max_chunk_size: int = 500) -> list:
     """Split text into smaller chunks for faster processing"""
@@ -120,42 +120,49 @@ def chunk_text(text: str, max_chunk_size: int = 500) -> list:
     
     return chunks
 
-def generate_with_groq(prompt: str, system: str = None, stream: bool = False) -> str:
-    """Generate text using GROQ AI with optimized settings"""
-    try:
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
-        
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {GROQ_API_KEY}"
-        }
-        
-        payload = {
-            "messages": messages,
-            "model": GROQ_MODEL,
-            "stream": stream,
+def generate_with_gemini(prompt: str, system: str = None, stream: bool = False) -> str:
+    """Generate text using Google Gemini native REST API with retry for rate limits"""
+    url = f"{GEMINI_API_BASE}/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    headers = {"Content-Type": "application/json"}
+    
+    # Build contents array
+    if system:
+        prompt = f"{system}\n\n{prompt}"
+    
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
             "temperature": 0.3,
-            "max_tokens": 1000
+            "maxOutputTokens": 1500
         }
-        
-        response = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=30)
-        
-        if response.status_code != 200:
-            print(f"❌ GROQ API Error {response.status_code}: {response.text}")
-            raise HTTPException(status_code=500, detail=f"GROQ API error: {response.text}")
-        
-        data = response.json()
-        return data['choices'][0]['message']['content']
-        
-    except requests.exceptions.RequestException as e:
-        print(f"GROQ API error: {e}")
-        raise HTTPException(status_code=500, detail=f"GROQ processing failed: {str(e)}")
-    except Exception as e:
-        print(f"Error: {e}")
-        raise HTTPException(status_code=500, detail=f"GROQ processing failed: {str(e)}")
+    }
+    
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=60)
+            
+            if response.status_code == 429:
+                wait_time = (2 ** attempt) * 2  # 2s, 4s, 8s
+                print(f"⏳ Rate limited (attempt {attempt+1}/{max_retries}), waiting {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+            
+            if response.status_code != 200:
+                print(f"❌ Gemini API Error {response.status_code}: {response.text}")
+                raise HTTPException(status_code=500, detail=f"Gemini API error: {response.text}")
+            
+            data = response.json()
+            return data['candidates'][0]['content']['parts'][0]['text']
+            
+        except requests.exceptions.RequestException as e:
+            print(f"Gemini API error: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2)
+                continue
+            raise HTTPException(status_code=500, detail=f"Gemini processing failed: {str(e)}")
+    
+    raise HTTPException(status_code=429, detail="Gemini API rate limit exceeded. Please wait a moment and try again.")
 
 @app.post("/api/lectures")
 async def create_lecture(lecture: LectureCreate):
@@ -216,7 +223,7 @@ async def get_latest_lecture(user_id: str):
 
 @app.post("/api/lectures/{lecture_id}/process")
 async def process_lecture(lecture_id: str):
-    """Process lecture transcription through Grok AI with chunking for faster processing"""
+    """Process lecture transcription through Gemini AI with chunking for faster processing"""
     try:
         # Get the lecture
         doc = db.collection("lectures").document(lecture_id).get()
@@ -280,22 +287,22 @@ Summary:"""
         # Use ThreadPoolExecutor for parallel processing (simpler, no asyncio issues)
         with ThreadPoolExecutor(max_workers=4) as executor:
             breakdown_future = executor.submit(
-                generate_with_groq, 
+                generate_with_gemini, 
                 breakdown_prompt,
                 "Break words into syllables. Output only the result."
             )
             steps_future = executor.submit(
-                generate_with_groq,
+                generate_with_gemini,
                 steps_prompt,
                 "Create numbered steps. Be concise."
             )
             mindmap_future = executor.submit(
-                generate_with_groq,
+                generate_with_gemini,
                 mindmap_prompt,
                 "Create a brief mind map. Keep it very short."
             )
             summary_future = executor.submit(
-                generate_with_groq,
+                generate_with_gemini,
                 summary_prompt,
                 "Write a 2-3 sentence summary."
             )
@@ -481,7 +488,7 @@ class RecommendationRequest(BaseModel):
 @app.post("/api/handwriting/analyze")
 async def analyze_handwriting(file: UploadFile = File(...), userId: str = "anonymous"):
     """
-    Analyze handwriting image for dyslexia-related errors using GROQ Vision AI
+    Analyze handwriting image for dyslexia-related errors using Gemini Vision AI
     """
     try:
         file_content = await file.read()
@@ -490,16 +497,10 @@ async def analyze_handwriting(file: UploadFile = File(...), userId: str = "anony
         # Determine mime type
         mime_type = file.content_type or 'image/jpeg'
         
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {GROQ_API_KEY}"
-        }
+        url = f"{GEMINI_API_BASE}/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+        headers = {"Content-Type": "application/json"}
         
-        payload = {
-            "messages": [
-                {
-                    "role": "system",
-                    "content": """You are a dyslexia handwriting analysis expert. Analyze handwritten text in images and detect common dyslexia-related errors.
+        system_prompt = """You are a dyslexia handwriting analysis expert. Analyze handwritten text in images and detect common dyslexia-related errors.
 
 IMPORTANT: You must respond ONLY with valid JSON in exactly this format, no other text:
 {
@@ -515,35 +516,51 @@ IMPORTANT: You must respond ONLY with valid JSON in exactly this format, no othe
   ],
   "recommendations": ["<practice tip 1>", "<practice tip 2>", "<practice tip 3>"]
 }"""
-                },
+
+        user_prompt = "Analyze this handwriting for dyslexia-related errors. Check for: letter reversals (b/d, p/q, m/w), spacing problems, incorrect letter formation, inconsistent alignment, mirror writing. Provide a score from 0-100 and list all detected issues with severity levels."
+
+        payload = {
+            "contents": [
                 {
                     "role": "user",
-                    "content": [
+                    "parts": [
+                        {"text": f"{system_prompt}\n\n{user_prompt}"},
                         {
-                            "type": "text",
-                            "text": "Analyze this handwriting for dyslexia-related errors. Check for: letter reversals (b/d, p/q, m/w), spacing problems, incorrect letter formation, inconsistent alignment, mirror writing. Provide a score from 0-100 and list all detected issues with severity levels."
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:{mime_type};base64,{base64_image}"
+                            "inlineData": {
+                                "mimeType": mime_type,
+                                "data": base64_image
                             }
                         }
                     ]
                 }
             ],
-            "model": "llama-3.2-90b-vision-preview",
-            "temperature": 0.3,
-            "max_tokens": 1500
+            "generationConfig": {
+                "temperature": 0.3,
+                "maxOutputTokens": 1500
+            }
         }
         
-        response = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=60)
+        # Retry with backoff for rate limits
+        result_text = None
+        max_retries = 3
+        for attempt in range(max_retries):
+            response = requests.post(url, headers=headers, json=payload, timeout=90)
+            
+            if response.status_code == 429:
+                wait_time = (2 ** attempt) * 2
+                print(f"⏳ Vision rate limited (attempt {attempt+1}/{max_retries}), waiting {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+            
+            if response.status_code != 200:
+                print(f"Gemini Vision API Error: {response.status_code} - {response.text}")
+                raise HTTPException(status_code=500, detail=f"Vision API error: {response.text}")
+            
+            result_text = response.json()['candidates'][0]['content']['parts'][0]['text']
+            break
         
-        if response.status_code != 200:
-            print(f"GROQ Vision API Error: {response.status_code} - {response.text}")
-            raise HTTPException(status_code=500, detail=f"Vision API error: {response.text}")
-        
-        result_text = response.json()['choices'][0]['message']['content']
+        if result_text is None:
+            raise HTTPException(status_code=429, detail="Rate limit exceeded. Please wait a moment and try again.")
         
         # Parse the JSON response
         try:
@@ -668,10 +685,10 @@ Text:
 Mind Map:"""
         
         with ThreadPoolExecutor(max_workers=4) as executor:
-            notes_future = executor.submit(generate_with_groq, notes_prompt, "Simplify content for dyslexic learners. Be clear and concise.")
-            flashcard_future = executor.submit(generate_with_groq, flashcard_prompt, "Create flashcards. Use Q: and A: format strictly.")
-            quiz_future = executor.submit(generate_with_groq, quiz_prompt, "Create a quiz. Mark correct answers with (correct).")
-            mindmap_future = executor.submit(generate_with_groq, mindmap_prompt, "Create a text mind map using tree characters.")
+            notes_future = executor.submit(generate_with_gemini, notes_prompt, "Simplify content for dyslexic learners. Be clear and concise.")
+            flashcard_future = executor.submit(generate_with_gemini, flashcard_prompt, "Create flashcards. Use Q: and A: format strictly.")
+            quiz_future = executor.submit(generate_with_gemini, quiz_prompt, "Create a quiz. Mark correct answers with (correct).")
+            mindmap_future = executor.submit(generate_with_gemini, mindmap_prompt, "Create a text mind map using tree characters.")
             
             simplified_notes = notes_future.result()
             flashcards = flashcard_future.result()
@@ -711,7 +728,7 @@ Provide specific, actionable recommendations. Format as a JSON array:
   {{"title": "...", "description": "...", "priority": "high|medium|low"}}
 ]"""
         
-        result = generate_with_groq(prompt, "You are an educational psychologist specializing in dyslexia. Provide practical learning recommendations. Respond with valid JSON only.")
+        result = generate_with_gemini(prompt, "You are an educational psychologist specializing in dyslexia. Provide practical learning recommendations. Respond with valid JSON only.")
         
         try:
             json_start = result.find('[')

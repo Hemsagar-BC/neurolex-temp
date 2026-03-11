@@ -1,5 +1,5 @@
-@import "tailwindcss";
 @import url('https://fonts.cdnfonts.com/css/opendyslexic');
+@import "tailwindcss";
 
 :root {
   --a11y-font-size: 18px;
@@ -70,7 +70,9 @@ body.focus-mode .focus-dimmable:focus-within {
 }
 
 /* Touch-friendly targets - minimum 48px */
-button, a, [role="button"] {
+button,
+a,
+[role="button"] {
   min-height: 48px;
   min-width: 48px;
   display: inline-flex;
@@ -79,18 +81,22 @@ button, a, [role="button"] {
 }
 
 /* Input fields - touch friendly */
-input, textarea, select {
+input,
+textarea,
+select {
   min-height: 48px;
-  font-size: 16px; /* Prevents zoom on iOS */
+  font-size: 16px;
+  /* Prevents zoom on iOS */
   padding: 0.75rem;
 }
 
 /* Mobile optimizations */
 @media (max-width: 640px) {
   body {
-    font-size: 16px; /* Prevents iOS zoom on input focus */
+    font-size: 16px;
+    /* Prevents iOS zoom on input focus */
   }
-  
+
   .touch-target {
     min-height: 56px;
     min-width: 56px;
@@ -103,6 +109,7 @@ input, textarea, select {
     transform: translate(0%, 0%);
     opacity: 1;
   }
+
   100% {
     transform: translate(-100%, 0%);
     opacity: 0;
@@ -114,6 +121,7 @@ input, textarea, select {
     transform: translate(0%, 0%);
     opacity: 1;
   }
+
   100% {
     transform: translate(100%, 0%);
     opacity: 0;

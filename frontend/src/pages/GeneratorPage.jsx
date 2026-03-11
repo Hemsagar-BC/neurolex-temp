@@ -37,7 +37,7 @@ export default function GeneratorPage() {
         if (file.type === 'application/pdf') {
             try {
                 const pdfjsLib = await import('pdfjs-dist');
-                pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
+                pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url).href;
 
                 const arrayBuffer = await file.arrayBuffer();
                 const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
@@ -214,8 +214,8 @@ export default function GeneratorPage() {
                                         key={tab.id}
                                         onClick={() => setActiveTab(tab.id)}
                                         className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium whitespace-nowrap transition-all ${activeTab === tab.id
-                                                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                                                : 'bg-white/5 text-white/60 border border-white/10 hover:bg-white/10'
+                                            ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                                            : 'bg-white/5 text-white/60 border border-white/10 hover:bg-white/10'
                                             }`}
                                     >
                                         <Icon size={16} />

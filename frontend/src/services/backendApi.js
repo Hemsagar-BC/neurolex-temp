@@ -1,5 +1,5 @@
 // Backend API service for lecture operations
-// Calls Python FastAPI backend with GROQ AI integration
+// Calls Python FastAPI backend with Gemini AI integration
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
 
@@ -65,7 +65,7 @@ export async function getLatestLecture(userId) {
 }
 
 /**
- * Process lecture transcription through Groq AI
+ * Process lecture transcription through Gemini AI
  */
 export async function processLecture(lectureId) {
   try {
