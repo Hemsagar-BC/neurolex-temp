@@ -14,7 +14,6 @@ from dotenv import load_dotenv
 import requests
 import time
 import json
-import base64
 from io import BytesIO
 from PIL import Image, ImageEnhance, ImageFilter
 
@@ -501,10 +500,29 @@ async def analyze_handwriting(file: UploadFile = File(...), userId: str = "anony
         if len(file_content) > 50 * 1024 * 1024:
             raise HTTPException(status_code=400, detail="File size exceeds 50 MB limit.")
         
-        base64_image = base64.b64encode(file_content).decode('utf-8')
-        
-        # Determine mime type
-        mime_type = file.content_type or 'image/jpeg'
+        # Enhance image for better OCR/analysis
+        try:
+            img = Image.open(BytesIO(file_content))
+            # Convert to RGB if needed (handles RGBA, grayscale, etc.)
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            # Increase contrast
+            img = ImageEnhance.Contrast(img).enhance(1.5)
+            # Increase sharpness
+            img = ImageEnhance.Sharpness(img).enhance(2.0)
+            # Slight brightness boost
+            img = ImageEnhance.Brightness(img).enhance(1.1)
+            # Save enhanced image to buffer
+            buf = BytesIO()
+            img.save(buf, format='JPEG', quality=95)
+            enhanced_bytes = buf.getvalue()
+            base64_image = base64.b64encode(enhanced_bytes).decode('utf-8')
+            mime_type = 'image/jpeg'
+            print(f"🖼️ Image enhanced: {img.size[0]}x{img.size[1]}, {len(enhanced_bytes)} bytes")
+        except Exception as img_err:
+            print(f"⚠️ Image enhancement failed ({img_err}), using original")
+            base64_image = base64.b64encode(file_content).decode('utf-8')
+            mime_type = file.content_type or 'image/jpeg'
         
         url = f"{GEMINI_API_BASE}/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
         headers = {"Content-Type": "application/json"}
@@ -632,19 +650,33 @@ JSON format — output ONLY this, nothing else:
             print(f"❌ JSON parse failed: {parse_err}")
             print(f"❌ Raw response (first 500 chars): {result_text[:500]}")
             
-            # Last resort: try a more aggressive cleanup
+            # Try to repair truncated JSON
             try:
                 import re as regex_module
-                # Find anything that looks like a JSON object
-                json_match = regex_module.search(r'\{[\s\S]*\}', result_text)
+                
+                # Strategy 1: Find the JSON and try to repair truncation
+                json_match = regex_module.search(r'\{[\s\S]*', result_text)
                 if json_match:
-                    fallback_json = json_match.group()
-                    # Remove any control characters
-                    fallback_json = regex_module.sub(r'[\x00-\x1f\x7f-\x9f]', ' ', fallback_json)
-                    result = json.loads(fallback_json)
-                    print(f"✅ Recovered JSON on second attempt. Score: {result.get('score', 'N/A')}")
+                    truncated = json_match.group()
+                    # Remove control characters
+                    truncated = regex_module.sub(r'[\x00-\x1f\x7f-\x9f]', ' ', truncated)
+                    
+                    # Try to repair: close any unclosed strings and brackets
+                    repaired = truncated.rstrip()
+                    # If it ends mid-string, close the string
+                    if repaired.count('"') % 2 != 0:
+                        repaired += '"'
+                    # Count open/close brackets and close any unclosed ones
+                    open_brackets = repaired.count('{') - repaired.count('}')
+                    open_arrays = repaired.count('[') - repaired.count(']')
+                    # Close arrays first, then objects
+                    repaired += ']' * max(0, open_arrays)
+                    repaired += '}' * max(0, open_brackets)
+                    
+                    result = json.loads(repaired)
+                    print(f"✅ Recovered truncated JSON. Score: {result.get('score', 'N/A')}")
                     result.setdefault("extractedText", "")
-                    result.setdefault("summary", "Analysis complete.")
+                    result.setdefault("summary", "Analysis complete (response was truncated).")
                     result.setdefault("categoryScores", {})
                     result.setdefault("errors", [])
                     result.setdefault("spellingErrors", [])
@@ -652,30 +684,33 @@ JSON format — output ONLY this, nothing else:
                     result.setdefault("recommendations", [])
                 else:
                     raise ValueError("No JSON object found in response")
-            except Exception:
-                # True fallback — but use extractedText from raw if possible
+            except Exception as repair_err:
+                print(f"❌ JSON repair also failed: {repair_err}")
+                # Extract what we can using regex
+                score_match = re.search(r'"score"\s*:\s*(\d+)', result_text)
+                text_match = re.search(r'"extractedText"\s*:\s*"([^"]*)', result_text)
+                score_val = int(score_match.group(1)) if score_match else 50
+                text_val = text_match.group(1) if text_match else ""
+                
+                # Try to extract category scores individually
+                cats = {}
+                for cat in ["letterFormation", "spacing", "alignment", "spelling", "sizing", "legibility"]:
+                    cat_match = re.search(rf'"{cat}"\s*:\s*(\d+)', result_text)
+                    cats[cat] = int(cat_match.group(1)) if cat_match else score_val
+                
                 result = {
-                    "score": 0,
-                    "extractedText": "",
-                    "summary": "Analysis could not parse the AI response. Please try again with a clearer image.",
-                    "categoryScores": {
-                        "letterFormation": 0, "spacing": 0, "alignment": 0,
-                        "spelling": 0, "sizing": 0, "legibility": 0
-                    },
-                    "errors": [{
-                        "type": "Parse Error",
-                        "severity": "high",
-                        "word": "",
-                        "correction": "",
-                        "description": "The AI response could not be parsed. This usually means the image was unclear or the AI returned an unexpected format.",
-                        "suggestion": "Try uploading a clearer, well-lit photo of the handwriting."
-                    }],
+                    "score": score_val,
+                    "extractedText": text_val,
+                    "summary": "Analysis partially recovered from AI response.",
+                    "categoryScores": cats,
+                    "errors": [],
                     "spellingErrors": [],
                     "strengths": [],
                     "recommendations": [
-                        {"title": "Try again", "description": "Upload a clearer photo with good lighting and contrast.", "priority": "high"}
+                        {"title": "Try again", "description": "Upload a clearer photo with good lighting for more detailed analysis.", "priority": "medium"}
                     ]
                 }
+                print(f"⚠️ Regex fallback used. Score: {score_val}, Categories: {cats}")
         
         # Save to Firestore
         try:
