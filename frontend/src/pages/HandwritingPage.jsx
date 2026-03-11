@@ -77,6 +77,9 @@ export default function HandwritingPage() {
             });
 
             if (!response.ok) {
+                if (response.status === 429) {
+                    throw new Error('AI service is busy (rate limit). Please wait 1-2 minutes and try again.');
+                }
                 throw new Error('Analysis failed. Please try again.');
             }
 

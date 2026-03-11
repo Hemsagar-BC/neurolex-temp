@@ -75,7 +75,12 @@ export default function GeneratorPage() {
                 }),
             });
 
-            if (!response.ok) throw new Error('Content generation failed');
+            if (!response.ok) {
+                if (response.status === 429) {
+                    throw new Error('AI service is busy (rate limit). Please wait 1-2 minutes and try again.');
+                }
+                throw new Error('Content generation failed');
+            }
 
             const data = await response.json();
             setOutputs(data);

@@ -14,8 +14,14 @@ from dotenv import load_dotenv
 import requests
 import time
 import json
+import threading
 from io import BytesIO
 from PIL import Image, ImageEnhance, ImageFilter
+
+# Global rate limiter for Gemini API (free tier: ~15 RPM)
+_gemini_lock = threading.Lock()
+_last_gemini_call = 0
+MIN_CALL_INTERVAL = 2  # seconds between Gemini API calls
 
 # Load environment variables
 load_dotenv()
@@ -122,6 +128,19 @@ def chunk_text(text: str, max_chunk_size: int = 500) -> list:
     
     return chunks
 
+def _throttle_gemini():
+    """Ensure minimum interval between Gemini API calls to respect rate limits."""
+    global _last_gemini_call
+    with _gemini_lock:
+        now = time.time()
+        elapsed = now - _last_gemini_call
+        if elapsed < MIN_CALL_INTERVAL:
+            wait = MIN_CALL_INTERVAL - elapsed
+            print(f"🕐 Throttling Gemini call, waiting {wait:.1f}s...")
+            time.sleep(wait)
+        _last_gemini_call = time.time()
+
+
 def generate_with_gemini(prompt: str, system: str = None, stream: bool = False) -> str:
     """Generate text using Google Gemini native REST API with retry for rate limits"""
     url = f"{GEMINI_API_BASE}/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
@@ -139,13 +158,14 @@ def generate_with_gemini(prompt: str, system: str = None, stream: bool = False) 
         }
     }
     
-    max_retries = 3
+    max_retries = 4
     for attempt in range(max_retries):
         try:
-            response = requests.post(url, headers=headers, json=payload, timeout=60)
+            _throttle_gemini()
+            response = requests.post(url, headers=headers, json=payload, timeout=90)
             
             if response.status_code == 429:
-                wait_time = (2 ** attempt) * 2  # 2s, 4s, 8s
+                wait_time = min((2 ** attempt) * 3, 30)  # 3s, 6s, 12s, 24s — max ~45s total
                 print(f"⏳ Rate limited (attempt {attempt+1}/{max_retries}), waiting {wait_time}s...")
                 time.sleep(wait_time)
                 continue
@@ -160,11 +180,11 @@ def generate_with_gemini(prompt: str, system: str = None, stream: bool = False) 
         except requests.exceptions.RequestException as e:
             print(f"Gemini API error: {e}")
             if attempt < max_retries - 1:
-                time.sleep(2)
+                time.sleep(3)
                 continue
             raise HTTPException(status_code=500, detail=f"Gemini processing failed: {str(e)}")
     
-    raise HTTPException(status_code=429, detail="Gemini API rate limit exceeded. Please wait a moment and try again.")
+    raise HTTPException(status_code=429, detail="Gemini API rate limit exceeded. Please wait 1-2 minutes and try again.")
 
 @app.post("/api/lectures")
 async def create_lecture(lecture: LectureCreate):
@@ -571,12 +591,13 @@ JSON format — output ONLY this, nothing else:
         
         # Retry with backoff for rate limits
         result_text = None
-        max_retries = 3
+        max_retries = 4
         for attempt in range(max_retries):
+            _throttle_gemini()
             response = requests.post(url, headers=headers, json=payload, timeout=90)
             
             if response.status_code == 429:
-                wait_time = (2 ** attempt) * 2
+                wait_time = min((2 ** attempt) * 3, 30)  # 3s, 6s, 12s, 24s
                 print(f"⏳ Vision rate limited (attempt {attempt+1}/{max_retries}), waiting {wait_time}s...")
                 time.sleep(wait_time)
                 continue
@@ -747,8 +768,6 @@ async def transform_content(request: ContentTransformRequest):
         print(f"🔄 Transforming content ({len(text)} chars)...")
         start_time = time.time()
         
-        from concurrent.futures import ThreadPoolExecutor
-        
         notes_prompt = f"""Simplify this educational content for a student with dyslexia. Use:
 - Short, clear sentences
 - Simple vocabulary
@@ -805,16 +824,12 @@ Text:
 
 Mind Map:"""
         
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            notes_future = executor.submit(generate_with_gemini, notes_prompt, "Simplify content for dyslexic learners. Be clear and concise.")
-            flashcard_future = executor.submit(generate_with_gemini, flashcard_prompt, "Create flashcards. Use Q: and A: format strictly.")
-            quiz_future = executor.submit(generate_with_gemini, quiz_prompt, "Create a quiz. Mark correct answers with (correct).")
-            mindmap_future = executor.submit(generate_with_gemini, mindmap_prompt, "Create a text mind map using tree characters.")
-            
-            simplified_notes = notes_future.result()
-            flashcards = flashcard_future.result()
-            quiz = quiz_future.result()
-            mind_map = mindmap_future.result()
+        # Run sequentially to avoid rate limits (Gemini free tier: ~15 RPM)
+        # The global throttle ensures minimum spacing between calls
+        simplified_notes = generate_with_gemini(notes_prompt, "Simplify content for dyslexic learners. Be clear and concise.")
+        flashcards = generate_with_gemini(flashcard_prompt, "Create flashcards. Use Q: and A: format strictly.")
+        quiz = generate_with_gemini(quiz_prompt, "Create a quiz. Mark correct answers with (correct).")
+        mind_map = generate_with_gemini(mindmap_prompt, "Create a text mind map using tree characters.")
         
         elapsed = time.time() - start_time
         print(f"✅ Content transformation complete in {elapsed:.1f}s")
