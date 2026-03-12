@@ -28,10 +28,10 @@ from app.routers import assessment as assessment_router
 from app.routers import games as games_router
 from app.services.severity_model import load_model as load_severity_model
 
-# Global rate limiter for Gemini API (free tier: ~15 RPM)
+# Global rate limiter for Gemini API (free tier: ~15 RPM for 2.0-flash)
 _gemini_lock = threading.Lock()
 _last_gemini_call = 0
-MIN_CALL_INTERVAL = 2  # seconds between Gemini API calls
+MIN_CALL_INTERVAL = 4  # seconds between Gemini API calls (conservative for free tier)
 
 # Load environment variables
 load_dotenv()
@@ -113,8 +113,33 @@ class LectureUpdate(BaseModel):
     summary: str = None
 
 # Google Gemini API Configuration (native REST API)
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")  # Gemini API key
-GEMINI_MODEL = "gemini-2.5-flash"  # Gemini model for text and vision
+# Supports multiple API keys for rotation (comma-separated in GEMINI_API_KEYS env var)
+_all_gemini_keys = [k.strip() for k in os.getenv("GEMINI_API_KEYS", "").split(",") if k.strip()]
+if not _all_gemini_keys:
+    # Fallback to single key
+    _single_key = os.getenv("GEMINI_API_KEY", "")
+    if _single_key:
+        _all_gemini_keys = [_single_key]
+
+_current_key_index = 0
+
+def _get_gemini_key() -> str:
+    """Get the current Gemini API key, rotating if multiple are available."""
+    global _current_key_index
+    if not _all_gemini_keys:
+        raise HTTPException(status_code=500, detail="No Gemini API key configured")
+    return _all_gemini_keys[_current_key_index % len(_all_gemini_keys)]
+
+def _rotate_gemini_key():
+    """Switch to the next API key after a quota exhaustion."""
+    global _current_key_index
+    if len(_all_gemini_keys) > 1:
+        _current_key_index = (_current_key_index + 1) % len(_all_gemini_keys)
+        print(f"🔄 Rotated to Gemini API key #{_current_key_index + 1}/{len(_all_gemini_keys)}")
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")  # Kept for backward compat
+GEMINI_MODEL = "gemini-2.5-flash"  # Gemini model for text tasks
+GEMINI_VISION_MODEL = "gemini-2.5-flash"  # Vision model (supports image analysis)
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
 @app.get("/")
@@ -164,7 +189,6 @@ def _throttle_gemini():
 
 def generate_with_gemini(prompt: str, system: str = None, stream: bool = False) -> str:
     """Generate text using Google Gemini native REST API with retry for rate limits"""
-    url = f"{GEMINI_API_BASE}/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
     headers = {"Content-Type": "application/json"}
     
     # Build contents array
@@ -175,18 +199,25 @@ def generate_with_gemini(prompt: str, system: str = None, stream: bool = False) 
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {
             "temperature": 0.3,
-            "maxOutputTokens": 1500
+            "maxOutputTokens": 4096
         }
     }
     
-    max_retries = 4
+    max_retries = 5
     for attempt in range(max_retries):
         try:
             _throttle_gemini()
+            url = f"{GEMINI_API_BASE}/{GEMINI_MODEL}:generateContent?key={_get_gemini_key()}"
             response = requests.post(url, headers=headers, json=payload, timeout=90)
             
             if response.status_code == 429:
-                wait_time = min((2 ** attempt) * 3, 30)  # 3s, 6s, 12s, 24s — max ~45s total
+                # Try rotating to next key first
+                _rotate_gemini_key()
+                retry_after = response.headers.get('Retry-After')
+                if retry_after:
+                    wait_time = min(int(retry_after), 90)
+                else:
+                    wait_time = min((2 ** attempt) * 10, 90)  # 10s, 20s, 40s, 80s, 90s
                 print(f"⏳ Rate limited (attempt {attempt+1}/{max_retries}), waiting {wait_time}s...")
                 time.sleep(wait_time)
                 continue
@@ -567,7 +598,7 @@ async def analyze_handwriting(file: UploadFile = File(...), userId: str = "anony
             base64_image = base64.b64encode(file_content).decode('utf-8')
             mime_type = file.content_type or 'image/jpeg'
         
-        url = f"{GEMINI_API_BASE}/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+        url = f"{GEMINI_API_BASE}/{GEMINI_VISION_MODEL}:generateContent?key={_get_gemini_key()}"
         headers = {"Content-Type": "application/json"}
         
         system_prompt = """You are a dyslexia handwriting analyst. Analyze the handwriting image and respond with ONLY a JSON object (no markdown, no code fences, no extra text).
@@ -612,15 +643,31 @@ JSON format — output ONLY this, nothing else:
             }
         }
         
-        # Retry with backoff for rate limits
+        # Retry with backoff for rate limits (free tier needs longer waits)
         result_text = None
-        max_retries = 4
+        max_retries = 5
         for attempt in range(max_retries):
             _throttle_gemini()
-            response = requests.post(url, headers=headers, json=payload, timeout=90)
+            # Rebuild URL each attempt (key may have rotated)
+            attempt_url = f"{GEMINI_API_BASE}/{GEMINI_VISION_MODEL}:generateContent?key={_get_gemini_key()}"
+            try:
+                response = requests.post(attempt_url, headers=headers, json=payload, timeout=120)
+            except requests.exceptions.RequestException as req_err:
+                print(f"⚠️ Request failed (attempt {attempt+1}): {req_err}")
+                if attempt < max_retries - 1:
+                    time.sleep(10)
+                    continue
+                raise HTTPException(status_code=500, detail=f"Network error: {str(req_err)}")
             
             if response.status_code == 429:
-                wait_time = min((2 ** attempt) * 3, 30)  # 3s, 6s, 12s, 24s
+                # Rotate to next API key if available
+                _rotate_gemini_key()
+                # Parse Retry-After header if available, otherwise use exponential backoff
+                retry_after = response.headers.get('Retry-After')
+                if retry_after:
+                    wait_time = min(int(retry_after), 90)
+                else:
+                    wait_time = min((2 ** attempt) * 10, 90)  # 10s, 20s, 40s, 80s, 90s
                 print(f"⏳ Vision rate limited (attempt {attempt+1}/{max_retries}), waiting {wait_time}s...")
                 time.sleep(wait_time)
                 continue
@@ -633,7 +680,7 @@ JSON format — output ONLY this, nothing else:
             break
         
         if result_text is None:
-            raise HTTPException(status_code=429, detail="Rate limit exceeded. Please wait a moment and try again.")
+            raise HTTPException(status_code=429, detail="Rate limit exceeded. Please wait 1-2 minutes and try again.")
         
         # Parse the JSON response
         try:
@@ -791,45 +838,83 @@ async def transform_content(request: ContentTransformRequest):
         print(f"🔄 Transforming content ({len(text)} chars)...")
         start_time = time.time()
         
-        notes_prompt = f"""Simplify this educational content for a student with dyslexia. Use:
-- Short, clear sentences
-- Simple vocabulary
-- Bullet points for key facts
-- Bold key terms
+        notes_prompt = f"""You are a teacher helping a dyslexic student understand this topic. Rewrite the content below in a way that is EASY to read and DETAILED enough to fully understand the topic.
+
+Rules:
+- Use simple, everyday words (no jargon)
+- Write in short, clear sentences (max 15 words each)
+- Use bullet points (start each point with a dash -)
+- DO NOT use any markdown symbols like # or * or **
+- Group related points under plain text headings (just capitalize the heading, no symbols)
+- Explain every key concept — do not skip anything
+- Add a brief "Why This Matters" section at the end
+- The output should be at least 300 words and cover ALL the main ideas from the text
+- Use line breaks between sections for easy reading
 
 Text:
 {text}
 
 Simplified notes:"""
         
-        flashcard_prompt = f"""Create 5-8 flashcards from this content. Format EXACTLY as:
-Q: [question]
-A: [answer]
+        flashcard_prompt = f"""Create 8-10 flashcards to help a dyslexic student learn this content.
 
-Q: [question]
-A: [answer]
+Rules:
+- Each question should test ONE key concept
+- Keep questions clear and simple (no trick questions)
+- Answers should be 1-2 sentences, easy to remember
+- Use simple vocabulary
+- Cover all the important topics in the text
+
+Format EXACTLY like this (no extra text):
+Q: What is photosynthesis?
+A: It is the process plants use to make food from sunlight, water, and carbon dioxide.
+
+Q: Why is photosynthesis important?
+A: It produces oxygen that all living things need to breathe.
 
 Text:
 {text}
 
 Flashcards:"""
         
-        quiz_prompt = f"""Create a 5-question multiple choice quiz from this content. Format EXACTLY as:
+        quiz_prompt = f"""Create a 5-question multiple choice quiz from this content to help a dyslexic student review.
 
-1. [Question text]
-A. [Option]
-B. [Option]
-C. [Option] (correct)
-D. [Option]
+Rules:
+- Use simple, clear language in questions and options
+- Each question should have exactly 4 options (A, B, C, D)
+- Only ONE option per question is correct
+- Mark the correct option by adding (correct) after it
+- Make wrong options believable but clearly wrong if you know the material
+- Cover different parts of the content
 
-Mark the correct answer with (correct). 
+Format EXACTLY like this:
+
+1. What does the heart do?
+A. It helps you breathe
+B. It pumps blood through your body (correct)
+C. It digests food
+D. It filters waste
+
+2. Where is the heart located?
+A. In your head
+B. In your stomach
+C. In your chest (correct)
+D. In your back
 
 Text:
 {text}
 
 Quiz:"""
         
-        mindmap_prompt = f"""Create a text-based mind map from this content. Format as:
+        mindmap_prompt = f"""Create a detailed text-based mind map from this content with at least 4-5 main categories and 2-3 details under each.
+
+Rules:
+- Use simple words a dyslexic student can easily read
+- Cover ALL the main topics from the text
+- Each detail should be a short phrase (not full sentences)
+- Use tree-drawing characters for the structure
+
+Format EXACTLY like this:
 
 Main Topic Name
 ├─ Category 1
@@ -837,10 +922,14 @@ Main Topic Name
 │  └─ Detail 1b
 ├─ Category 2
 │  ├─ Detail 2a
-│  └─ Detail 2b
-└─ Category 3
-   ├─ Detail 3a
-   └─ Detail 3b
+│  ├─ Detail 2b
+│  └─ Detail 2c
+├─ Category 3
+│  ├─ Detail 3a
+│  └─ Detail 3b
+└─ Category 4
+   ├─ Detail 4a
+   └─ Detail 4b
 
 Text:
 {text}
@@ -849,10 +938,10 @@ Mind Map:"""
         
         # Run sequentially to avoid rate limits (Gemini free tier: ~15 RPM)
         # The global throttle ensures minimum spacing between calls
-        simplified_notes = generate_with_gemini(notes_prompt, "Simplify content for dyslexic learners. Be clear and concise.")
-        flashcards = generate_with_gemini(flashcard_prompt, "Create flashcards. Use Q: and A: format strictly.")
-        quiz = generate_with_gemini(quiz_prompt, "Create a quiz. Mark correct answers with (correct).")
-        mind_map = generate_with_gemini(mindmap_prompt, "Create a text mind map using tree characters.")
+        simplified_notes = generate_with_gemini(notes_prompt, "You are a patient dyslexia specialist teacher. Write detailed, easy-to-read notes. NO markdown symbols (no # or * or **). Use plain text with dashes for bullets. Be thorough — cover every key point.")
+        flashcards = generate_with_gemini(flashcard_prompt, "Create flashcards using ONLY Q: and A: format. No numbering, no extra text. Keep answers clear and simple.")
+        quiz = generate_with_gemini(quiz_prompt, "Create a multiple choice quiz. Use simple language. Mark correct answer with (correct). Format exactly as shown.")
+        mind_map = generate_with_gemini(mindmap_prompt, "Create a detailed text mind map using tree characters (├─ │ └─). Use simple words. Be thorough.")
         
         elapsed = time.time() - start_time
         print(f"✅ Content transformation complete in {elapsed:.1f}s")

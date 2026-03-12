@@ -1,7 +1,7 @@
 // Floating Accessibility Toolbar
 // Provides quick toggles for dyslexia-friendly settings on every page
 
-import React from 'react';
+import React, { useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
     Eye, Type, Minus, Plus, Sun, Moon,
@@ -34,11 +34,36 @@ export default function AccessibilityToolbar() {
         resetAll,
     } = useDyslexiaStore();
 
+    const panelRef = useRef(null);
+
+    // Close toolbar when clicking outside
+    useEffect(() => {
+        if (!toolbarOpen) return;
+        const handleClickOutside = (e) => {
+            // Don't close if clicking the toggle button or inside the panel
+            if (
+                panelRef.current && !panelRef.current.contains(e.target) &&
+                !e.target.closest('[data-a11y-toggle]')
+            ) {
+                toggleToolbar();
+            }
+        };
+        // Delay to avoid the opening click from immediately closing
+        const timer = setTimeout(() => {
+            document.addEventListener('mousedown', handleClickOutside);
+        }, 100);
+        return () => {
+            clearTimeout(timer);
+            document.removeEventListener('mousedown', handleClickOutside);
+        };
+    }, [toolbarOpen, toggleToolbar]);
+
     return (
         <>
             {/* Floating toggle button */}
             <motion.button
                 onClick={toggleToolbar}
+                data-a11y-toggle
                 className="fixed bottom-6 right-6 z-[9999] w-14 h-14 rounded-full flex items-center justify-center shadow-lg"
                 style={{
                     background: 'linear-gradient(135deg, #6366f1, #8b5cf6)',
@@ -70,16 +95,19 @@ export default function AccessibilityToolbar() {
             <AnimatePresence>
                 {toolbarOpen && (
                     <motion.div
-                        initial={{ opacity: 0, x: 300, scale: 0.8 }}
-                        animate={{ opacity: 1, x: 0, scale: 1 }}
-                        exit={{ opacity: 0, x: 300, scale: 0.8 }}
+                        ref={panelRef}
+                        initial={{ opacity: 0, y: 20, scale: 0.9 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: 20, scale: 0.9 }}
                         transition={{ type: 'spring', damping: 25, stiffness: 300 }}
-                        className="fixed bottom-24 right-6 z-[9999] w-80 max-h-[70vh] overflow-y-auto rounded-2xl shadow-2xl"
+                        className="fixed bottom-24 right-6 z-[9999] w-80 rounded-2xl shadow-2xl"
                         style={{
                             background: 'rgba(15, 15, 30, 0.95)',
                             backdropFilter: 'blur(20px)',
                             border: '1px solid rgba(99, 102, 241, 0.3)',
                             color: 'white',
+                            maxHeight: 'calc(100vh - 120px)',
+                            overflowY: 'auto',
                         }}
                     >
                         {/* Header */}

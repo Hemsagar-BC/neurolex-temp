@@ -1,19 +1,63 @@
 // Dyslexia-Friendly Reading Interface
 // Students paste or upload text → rendered in accessible format
-// Features: OpenDyslexic font, spacing controls, reading ruler, color overlays, TTS
+// Features: OpenDyslexic font, spacing controls, reading ruler, color overlays, TTS, Gaze Tracking
 
-import React, { useState, useRef } from 'react';
-import { motion } from 'framer-motion';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
 import {
     BookOpen, Upload, Play, Pause, ArrowLeft,
-    Volume2, VolumeX, Type, Eye, FileText, Loader2, SplitSquareHorizontal
+    Volume2, VolumeX, Type, Eye, FileText, Loader2, SplitSquareHorizontal, Crosshair, BarChart3, Zap, Mic
 } from 'lucide-react';
 import useDyslexiaStore from '../stores/dyslexiaStore';
+import { useAuth } from '../context/AuthContext';
+import { logReadingSession } from '../services/progressService';
+// Gaze tracking
+import { GazeProvider, useGaze } from '../context/GazeContext';
+import CalibrationWizard from '../components/gaze/CalibrationWizard';
+import GazeHighlighter from '../components/gaze/GazeHighlighter';
+import GazeTTS from '../components/gaze/GazeTTS';
+import GazeHeatmap from '../components/gaze/GazeHeatmap';
+import GazePiP from '../components/gaze/GazePiP';
+import WordHighlighter from '../components/gaze/WordHighlighter';
+import ReadingAnalytics from '../components/gaze/ReadingAnalytics';
+import useLineMapper, { splitIntoReadingLines } from '../hooks/useLineMapper';
+import useRereadDetector from '../hooks/useRereadDetector';
+import useAdaptiveTypography from '../hooks/useAdaptiveTypography';
+import {
+    startGazeSession, recordLineGaze, recordRereadEvent,
+    recordAdaptiveLevel, endGazeSession, getCurrentSessionSnapshot,
+    recordWordRead, recordWordStruggle, recordFusionStats,
+} from '../services/gazeAnalytics';
+// Lip sync + fusion
+import LipSyncEngine from '../services/LipSyncEngine';
+import FusionEngine from '../services/FusionEngine';
+import { WordRegistryManager } from '../utils/WordRegistry';
+// Trimodal reading intelligence
+import { trimodalOrchestrator } from '../services/TrimodalOrchestrator';
+import TrimodalStatusBar from '../components/gaze/TrimodalStatusBar';
+import PronunciationFeedback from '../components/gaze/PronunciationFeedback';
+import { PhoneticHintManager } from '../components/gaze/PhoneticHint';
+import { pronunciationAnalyser } from '../services/PronunciationAnalyser';
+// Voice-first reading engine
+import { voiceReadingEngine } from '../services/VoiceReadingEngine';
 
+
+
+// Wrapper that provides gaze context
 export default function ReadingPage() {
+    return (
+        <GazeProvider>
+            <ReadingPageInner />
+        </GazeProvider>
+    );
+}
+
+function ReadingPageInner() {
     const navigate = useNavigate();
+    const { currentUser: user } = useAuth();
     const [text, setText] = useState('');
+    const readingStartRef = React.useRef(null);
     const [isReading, setIsReading] = useState(false);
     const [displayMode, setDisplayMode] = useState('input'); // input | reading
     const [isSpeaking, setIsSpeaking] = useState(false);
@@ -24,6 +68,353 @@ export default function ReadingPage() {
     const [syllableMode, setSyllableMode] = useState(false);
     const textDisplayRef = useRef(null);
     const utteranceRef = useRef(null);
+
+    // ---- Gaze tracking state ----
+    const { startGaze, stopGaze, gazeActive, isCalibrated, setCalibrated, faceLandmarksRef, faceMeshService } = useGaze();
+    const [gazeEnabled, setGazeEnabled] = useState(false);
+    const [showCalibration, setShowCalibration] = useState(false);
+    const [showHeatmap, setShowHeatmap] = useState(false);
+    const [heatmapSnapshot, setHeatmapSnapshot] = useState(null);
+
+    // ---- Lip sync + Fusion state ----
+    const lipSyncRef = useRef(null);
+    const fusionRef = useRef(null);
+    const registryRef = useRef(null);
+    const fusionLoopRef = useRef(null);
+    const [lipSyncActive, setLipSyncActive] = useState(false);
+    const [fusionState, setFusionState] = useState(null);   // { confidence, method, text }
+    const [struggleWords, setStruggleWords] = useState(new Set());
+    const [rereadWordsMap, setRereadWordsMap] = useState(new Map());
+    const [showAnalytics, setShowAnalytics] = useState(false);
+
+    // ---- Trimodal state ----
+    const [trimodalActive, setTrimodalActive] = useState(false);
+    const [phoneticHints, setPhoneticHints] = useState([]);
+    const [fontBoostPx, setFontBoostPx] = useState(0);
+
+    // ---- Voice Reading Engine state ----
+    const [voiceReadingActive, setVoiceReadingActive] = useState(false);
+    const [stuckWord, setStuckWord] = useState(null); // { wordIndex, word, lineIndex, reason, syllables, phonetic }
+    const [voiceCurrentWord, setVoiceCurrentWord] = useState(-1); // current word index from voice
+    const [stuckWordSet, setStuckWordSet] = useState(new Set()); // all words that ever triggered help
+
+    // Gaze hooks (only active when gazeEnabled && displayMode === 'reading')
+    const gazeReading = gazeEnabled && displayMode === 'reading';
+    const { currentLine, rebuildRects } = useLineMapper(gazeReading ? textDisplayRef : { current: null });
+    const { rereadLines, rereadLog, resetReread } = useRereadDetector(gazeReading ? currentLine : -1, gazeReading);
+    const { getLineStyle, getLineLevel, resetTypography } = useAdaptiveTypography(rereadLines, gazeReading);
+
+    // Record line gaze for analytics
+    useEffect(() => {
+        if (gazeReading && currentLine >= 0) {
+            recordLineGaze(currentLine);
+            const level = getLineLevel(currentLine);
+            if (level > 0) recordAdaptiveLevel(currentLine, level);
+        }
+    }, [currentLine, gazeReading, getLineLevel]);
+
+    // Record reread events for analytics
+    useEffect(() => {
+        if (!gazeReading) return;
+        const handler = (e) => {
+            const { lineIndex, count } = e.detail;
+            recordRereadEvent(lineIndex, count);
+        };
+        window.addEventListener('reread', handler);
+        return () => window.removeEventListener('reread', handler);
+    }, [gazeReading]);
+
+    // ---- Lip Sync + Fusion lifecycle ----
+    useEffect(() => {
+        if (!gazeReading) {
+            // Teardown when gaze reading stops
+            if (fusionLoopRef.current) cancelAnimationFrame(fusionLoopRef.current);
+            if (lipSyncRef.current) { lipSyncRef.current.destroy(); lipSyncRef.current = null; }
+            if (fusionRef.current) { fusionRef.current.destroy(); fusionRef.current = null; }
+            if (registryRef.current) { registryRef.current.detach(); registryRef.current = null; }
+            setLipSyncActive(false);
+            setFusionState(null);
+            return;
+        }
+
+        // Check hardware capability
+        const cores = navigator.hardwareConcurrency || 2;
+        const canLipSync = cores >= 4;
+
+        // Initialize engines
+        const lipEngine = new LipSyncEngine();
+        const fusionEngine = new FusionEngine();
+        lipSyncRef.current = lipEngine;
+        fusionRef.current = fusionEngine;
+
+        // Word change tracking for analytics
+        const unsubWord = fusionEngine.onWordChange((detail) => {
+            setFusionState({ confidence: detail.confidence, method: detail.method, text: detail.text });
+            setRereadWordsMap(new Map(fusionEngine.rereadWords));
+            recordWordRead(detail);
+        });
+
+        const unsubStruggle = fusionEngine.onWordStruggle((detail) => {
+            setStruggleWords(new Set(fusionEngine.struggleWords));
+            recordWordStruggle(detail);
+        });
+
+        // Attach word registry once textDisplayRef is ready
+        let registryAttached = false;
+        const attachRegistry = () => {
+            if (!textDisplayRef.current || registryAttached) return;
+            const reg = new WordRegistryManager();
+            reg.attach(textDisplayRef.current);
+            registryRef.current = reg;
+            registryAttached = true;
+        };
+
+        // Delay slightly to let React render the text
+        const regTimer = setTimeout(attachRegistry, 300);
+
+        // FaceMeshService handles detection; feed lip engine from faceLandmarksRef
+        // via a polling loop (landmarks arrive in context from FaceMeshService callback)
+        if (canLipSync) setLipSyncActive(true);
+
+        let lipRunning = true;
+        let lastLipLandmarks = null;
+        const lipPoll = () => {
+            if (!lipRunning) return;
+            const lm = faceLandmarksRef.current;
+            if (lm && lm !== lastLipLandmarks && canLipSync && lipSyncRef.current) {
+                lastLipLandmarks = lm;
+                lipEngine.processFrame(lm);
+            }
+            requestAnimationFrame(lipPoll);
+        };
+        requestAnimationFrame(lipPoll);
+
+        // Fusion tick loop (~30fps): combine gaze + lip into word decision
+        const gazeRef = { x: 0, y: 0 };
+        const gazeHandler = (e) => {
+            gazeRef.x = e.detail.x;
+            gazeRef.y = e.detail.y;
+        };
+        window.addEventListener('gazeupdate', gazeHandler);
+
+        let running = true;
+        let cachedLipResult = null;
+        let lipMatchPending = false;
+        const fusionTick = () => {
+            if (!running) return;
+            if (registryRef.current && fusionRef.current) {
+                // Get lip match result if available
+                let lipResult = cachedLipResult;
+                if (lipSyncRef.current && registryRef.current && !lipMatchPending) {
+                    const candidates = registryRef.current.getWordCandidates(gazeRef.x, gazeRef.y);
+                    if (candidates.length > 0) {
+                        lipMatchPending = true;
+                        const matchPromise = lipSyncRef.current.matchWord(candidates.map(c => c.text));
+                        if (matchPromise && matchPromise.then) {
+                            matchPromise.then((match) => {
+                                lipMatchPending = false;
+                                if (match && match.word) {
+                                    const matched = candidates.find(c => c.text === match.word);
+                                    if (matched) {
+                                        cachedLipResult = {
+                                            wordIndex: matched.wordIndex,
+                                            text: matched.text,
+                                            confidence: match.confidence || 0.5,
+                                        };
+                                    }
+                                } else {
+                                    cachedLipResult = null;
+                                }
+                            }).catch(() => { lipMatchPending = false; });
+                        } else if (matchPromise) {
+                            lipMatchPending = false;
+                            const matched = candidates.find(c => c.text === matchPromise.word);
+                            if (matched) {
+                                cachedLipResult = {
+                                    wordIndex: matched.wordIndex,
+                                    text: matched.text,
+                                    confidence: matchPromise.confidence || 0.5,
+                                };
+                                lipResult = cachedLipResult;
+                            }
+                        } else {
+                            lipMatchPending = false;
+                        }
+                    }
+                }
+
+                fusionRef.current.processTick(
+                    gazeRef.x,
+                    gazeRef.y,
+                    lipResult,
+                    registryRef.current
+                );
+            }
+            fusionLoopRef.current = requestAnimationFrame(fusionTick);
+        };
+        fusionLoopRef.current = requestAnimationFrame(fusionTick);
+
+        return () => {
+            running = false;
+            lipRunning = false;
+            clearTimeout(regTimer);
+            if (fusionLoopRef.current) cancelAnimationFrame(fusionLoopRef.current);
+            window.removeEventListener('gazeupdate', gazeHandler);
+            unsubWord();
+            unsubStruggle();
+            if (lipSyncRef.current) { lipSyncRef.current.destroy(); lipSyncRef.current = null; }
+            if (fusionRef.current) {
+                recordFusionStats(fusionRef.current.getReadingStats());
+                fusionRef.current.destroy();
+                fusionRef.current = null;
+            }
+            if (registryRef.current) { registryRef.current.detach(); registryRef.current = null; }
+            setLipSyncActive(false);
+        };
+    }, [gazeReading, faceLandmarksRef]);
+
+    // ---- Trimodal Orchestrator lifecycle ----
+    useEffect(() => {
+        if (!gazeReading || !textDisplayRef.current || !text.trim()) {
+            if (trimodalActive) {
+                trimodalOrchestrator.stop();
+                setTrimodalActive(false);
+                setPhoneticHints([]);
+                setFontBoostPx(0);
+            }
+            return;
+        }
+
+        // Small delay to let word spans render
+        const startTimer = setTimeout(async () => {
+            try {
+                await trimodalOrchestrator.start(text, textDisplayRef.current, faceLandmarksRef);
+                setTrimodalActive(true);
+
+                // Listen for adaptive actions (phonetic hints, font boosts)
+                const unsubAction = trimodalOrchestrator.onAction((action) => {
+                    if (action.type === 'phonetic_hint') {
+                        // Get word rect from registry
+                        const reg = trimodalOrchestrator.getRegistry();
+                        const entry = reg?.getWordByIndex(action.wordIndex);
+                        setPhoneticHints(prev => [...prev, {
+                            wordIndex: action.wordIndex,
+                            text: action.text,
+                            phoneticText: action.hintText || '',
+                            rect: entry?.rect || null,
+                            durationMs: action.hintDurationMs || 4000,
+                        }]);
+                    }
+                    if (action.type === 'font_boost') {
+                        setFontBoostPx(action.fontBoostPx || 0);
+                    }
+                });
+
+                // Listen for word changes to update existing fusion state display
+                const unsubWord = trimodalOrchestrator.onWordChange((detail) => {
+                    setFusionState({ confidence: detail.confidence, method: detail.method, text: detail.text });
+                    setRereadWordsMap(new Map(trimodalOrchestrator.getFusionEngine().getRereadWords()));
+                });
+
+                const unsubStruggle = trimodalOrchestrator.onWordStruggle((detail) => {
+                    setStruggleWords(new Set(trimodalOrchestrator.getFusionEngine().getStruggleWords()));
+                    recordWordStruggle(detail);
+                });
+
+                // Store cleanup refs for the subscriptions
+                return () => {
+                    unsubAction();
+                    unsubWord();
+                    unsubStruggle();
+                };
+            } catch (e) {
+                console.warn('[ReadingPage] Trimodal start failed:', e);
+            }
+        }, 500);
+
+        return () => {
+            clearTimeout(startTimer);
+            trimodalOrchestrator.stop();
+            setTrimodalActive(false);
+        };
+    }, [gazeReading, text, faceLandmarksRef]);
+
+    // ---- Voice Reading Engine lifecycle ----
+    // Starts when user enters reading mode (regardless of gaze), always-on mic
+    useEffect(() => {
+        if (displayMode !== 'reading' || !text.trim()) {
+            if (voiceReadingActive) {
+                voiceReadingEngine.stop();
+                setVoiceReadingActive(false);
+                setStuckWord(null);
+                setVoiceCurrentWord(-1);
+            }
+            return;
+        }
+
+        // Start the voice engine after a brief render delay
+        const timer = setTimeout(async () => {
+            try {
+                await voiceReadingEngine.start(text, 12);
+                setVoiceReadingActive(true);
+
+                // Listen for stuck words (reread, mispronounced, silence)
+                const unsubStuck = voiceReadingEngine.onStuckWord((event) => {
+                    setStuckWord(event);
+                    setStuckWordSet(prev => new Set([...prev, event.wordIndex]));
+                });
+
+                // Listen for word progress (to track current reading position)
+                const unsubProgress = voiceReadingEngine.onWordProgress((event) => {
+                    setVoiceCurrentWord(event.wordIndex);
+                    // Clear stuck word when user progresses past it
+                    setStuckWord(prev => {
+                        if (prev && event.wordIndex > prev.wordIndex) return null;
+                        return prev;
+                    });
+                });
+
+                // Store cleanups in a ref-safe way
+                const cleanup = () => {
+                    unsubStuck();
+                    unsubProgress();
+                };
+                return cleanup;
+            } catch (e) {
+                console.warn('[ReadingPage] Voice engine start failed:', e);
+            }
+        }, 300);
+
+        return () => {
+            clearTimeout(timer);
+            voiceReadingEngine.stop();
+            setVoiceReadingActive(false);
+            setStuckWord(null);
+            setVoiceCurrentWord(-1);
+        };
+    }, [displayMode, text]);
+
+    // Toggle gaze tracking
+    const handleToggleGaze = useCallback(async () => {
+        if (gazeEnabled) {
+            // Stop gaze
+            stopGaze();
+            setGazeEnabled(false);
+            // End analytics session & get snapshot
+            const snap = getCurrentSessionSnapshot();
+            setHeatmapSnapshot(snap);
+            await endGazeSession();
+        } else {
+            // Start gaze
+            const ok = await startGaze();
+            if (ok) {
+                setGazeEnabled(true);
+                if (!isCalibrated) {
+                    setShowCalibration(true);
+                }
+            }
+        }
+    }, [gazeEnabled, startGaze, stopGaze, isCalibrated]);
 
     const { dyslexicFont, fontSize, letterSpacing, wordSpacing, lineHeight, focusMode } = useDyslexiaStore();
 
@@ -48,7 +439,57 @@ export default function ReadingPage() {
         if (text.trim()) {
             setDisplayMode('reading');
             setIsReading(true);
+            readingStartRef.current = Date.now();
+            // Start gaze analytics session
+            const lines = splitIntoReadingLines(text);
+            if (gazeEnabled) {
+                startGazeSession('reading', lines.length);
+            }
         }
+    };
+
+    const handleStopReading = () => {
+        // Log reading session to Firebase
+        if (user?.uid && readingStartRef.current) {
+            const elapsed = Math.round((Date.now() - readingStartRef.current) / 1000);
+            logReadingSession(user.uid, {
+                textLength: text.length,
+                readingTime: elapsed,
+            });
+            readingStartRef.current = null;
+        }
+        setDisplayMode('input');
+        setIsSpeaking(false);
+        window.speechSynthesis.cancel();
+        // Stop voice reading engine
+        if (voiceReadingActive) {
+            voiceReadingEngine.stop();
+            setVoiceReadingActive(false);
+            setStuckWord(null);
+            setVoiceCurrentWord(-1);
+            setStuckWordSet(new Set());
+        }
+        // Record trimodal stats before stopping
+        if (trimodalActive) {
+            recordFusionStats(trimodalOrchestrator.getReadingStats());
+            trimodalOrchestrator.stop();
+            setTrimodalActive(false);
+            setPhoneticHints([]);
+            setFontBoostPx(0);
+        }
+        // Record fusion stats before ending session
+        if (fusionRef.current) {
+            recordFusionStats(fusionRef.current.getReadingStats());
+        }
+        // End gaze session & snapshot
+        if (gazeEnabled) {
+            const snap = getCurrentSessionSnapshot();
+            setHeatmapSnapshot(snap);
+            endGazeSession();
+            resetReread();
+            resetTypography();
+        }
+        setShowAnalytics(false);
     };
 
     const handleFileUpload = async (e) => {
@@ -200,6 +641,46 @@ export default function ReadingPage() {
 
     const renderWord = (word, i) => {
         const isHighlighted = highlightedWordIndex === i;
+        const isVoiceCurrent = voiceCurrentWord === i;
+        const isStuck = stuckWord && stuckWord.wordIndex === i;
+        const wasStuck = stuckWordSet.has(i);
+
+        // When this word is the stuck word, show syllable breakdown + font boost
+        if (isStuck) {
+            const syllables = stuckWord.syllables || [word];
+            return (
+                <span
+                    key={i}
+                    data-word-index={i}
+                    className="inline-block transition-all duration-300 bg-red-500/20 text-white rounded-lg px-2 py-1 border border-red-400/40"
+                    style={{
+                        fontSize: `${fontSize + 6}px`,
+                        lineHeight: 1.4,
+                    }}
+                >
+                    {syllables.length > 1 ? (
+                        syllables.map((syl, si) => (
+                            <span key={si}>
+                                <span className="text-yellow-300 font-bold">{syl}</span>
+                                {si < syllables.length - 1 && (
+                                    <span className="text-red-400 font-bold mx-[2px] text-[0.7em]">·</span>
+                                )}
+                            </span>
+                        ))
+                    ) : (
+                        <span className="text-yellow-300 font-bold">{word}</span>
+                    )}
+                    {/* Phonetic hint below the word */}
+                    {stuckWord.phonetic && (
+                        <span className="block text-xs text-indigo-300/80 mt-1 font-mono">
+                            /{stuckWord.phonetic}/
+                        </span>
+                    )}
+                    {' '}
+                </span>
+            );
+        }
+
         if (syllableMode && word.replace(/[^a-zA-Z]/g, '').length >= 6) {
             const broken = breakIntoSyllables(word);
             const parts = broken.split('·');
@@ -207,7 +688,8 @@ export default function ReadingPage() {
                 return (
                     <span
                         key={i}
-                        className={`inline transition-colors duration-150 ${isHighlighted ? 'bg-indigo-500/30 text-white rounded px-1 focus-active' : 'text-white/90'
+                        data-word-index={i}
+                        className={`inline transition-colors duration-150 ${isHighlighted || isVoiceCurrent ? 'bg-indigo-500/30 text-white rounded px-1 focus-active' : wasStuck ? 'text-orange-300' : 'text-white/90'
                             }`}
                     >
                         {parts.map((part, pi) => (
@@ -226,7 +708,8 @@ export default function ReadingPage() {
         return (
             <span
                 key={i}
-                className={`inline transition-colors duration-150 ${isHighlighted ? 'bg-indigo-500/30 text-white rounded px-1 focus-active' : 'text-white/90'
+                data-word-index={i}
+                className={`inline transition-colors duration-150 ${isHighlighted || isVoiceCurrent ? 'bg-indigo-500/30 text-white rounded px-1 focus-active' : wasStuck ? 'text-orange-300' : 'text-white/90'
                     }`}
             >
                 {word}{' '}
@@ -368,7 +851,7 @@ export default function ReadingPage() {
                         {/* Controls bar */}
                         <div className="flex items-center justify-between rounded-xl p-4 bg-white/5 border border-white/10">
                             <button
-                                onClick={() => { setDisplayMode('input'); setIsSpeaking(false); window.speechSynthesis.cancel(); }}
+                                onClick={handleStopReading}
                                 className="flex items-center gap-2 text-sm text-white/60 hover:text-white transition-colors"
                             >
                                 <ArrowLeft size={16} />
@@ -443,24 +926,231 @@ export default function ReadingPage() {
                                     <SplitSquareHorizontal size={16} />
                                     <span className="text-xs">{syllableMode ? 'Syllables ON' : 'Break Down'}</span>
                                 </button>
+
+                                {/* Gaze tracking toggle */}
+                                <button
+                                    onClick={handleToggleGaze}
+                                    className="flex items-center gap-2 px-3 py-2 rounded-lg transition-colors text-sm"
+                                    style={{
+                                        background: gazeEnabled ? 'rgba(34, 197, 94, 0.2)' : 'rgba(255,255,255,0.05)',
+                                        border: `1px solid ${gazeEnabled ? 'rgba(34, 197, 94, 0.4)' : 'rgba(255,255,255,0.1)'}`,
+                                        color: gazeEnabled ? '#86efac' : 'rgba(255,255,255,0.5)',
+                                        minHeight: '32px',
+                                    }}
+                                    title="Eye tracking — highlights where you're reading"
+                                >
+                                    <Crosshair size={16} />
+                                    <span className="text-xs">{gazeEnabled ? 'Gaze ON' : 'Eye Track'}</span>
+                                </button>
+
+                                {/* Heatmap toggle (only if we have data) */}
+                                {gazeEnabled && (
+                                    <button
+                                        onClick={() => {
+                                            setHeatmapSnapshot(getCurrentSessionSnapshot());
+                                            setShowHeatmap(!showHeatmap);
+                                        }}
+                                        className="flex items-center gap-2 px-3 py-2 rounded-lg transition-colors text-sm"
+                                        style={{
+                                            background: showHeatmap ? 'rgba(99,102,241,0.2)' : 'rgba(255,255,255,0.05)',
+                                            border: `1px solid ${showHeatmap ? 'rgba(99,102,241,0.4)' : 'rgba(255,255,255,0.1)'}`,
+                                            color: showHeatmap ? '#a5b4fc' : 'rgba(255,255,255,0.5)',
+                                            minHeight: '32px',
+                                        }}
+                                    >
+                                        <BarChart3 size={16} />
+                                        <span className="text-xs">Heatmap</span>
+                                    </button>
+                                )}
+
+                                {/* Analytics toggle */}
+                                {gazeEnabled && (
+                                    <button
+                                        onClick={() => {
+                                            setHeatmapSnapshot(getCurrentSessionSnapshot());
+                                            setShowAnalytics(!showAnalytics);
+                                        }}
+                                        className="flex items-center gap-2 px-3 py-2 rounded-lg transition-colors text-sm"
+                                        style={{
+                                            background: showAnalytics ? 'rgba(6,182,212,0.2)' : 'rgba(255,255,255,0.05)',
+                                            border: `1px solid ${showAnalytics ? 'rgba(6,182,212,0.4)' : 'rgba(255,255,255,0.1)'}`,
+                                            color: showAnalytics ? '#67e8f9' : 'rgba(255,255,255,0.5)',
+                                            minHeight: '32px',
+                                        }}
+                                    >
+                                        <Zap size={16} />
+                                        <span className="text-xs">Analytics</span>
+                                    </button>
+                                )}
                             </div>
                         </div>
 
-                        {/* Reading area */}
-                        <div
-                            ref={textDisplayRef}
-                            className="reading-content p-8 rounded-2xl bg-white/5 border border-white/10"
-                            style={{
-                                fontFamily: dyslexicFont ? "'OpenDyslexic', sans-serif" : 'inherit',
-                                fontSize: `${fontSize}px`,
-                                letterSpacing: `${letterSpacing}px`,
-                                wordSpacing: `${wordSpacing}px`,
-                                lineHeight: lineHeight,
-                                maxWidth: '100%',
-                            }}
-                        >
-                            {words.map((word, i) => renderWord(word, i))}
+                        {/* Calibration Wizard */}
+                        {showCalibration && (
+                            <CalibrationWizard
+                                onComplete={() => setShowCalibration(false)}
+                                onSkip={() => setShowCalibration(false)}
+                            />
+                        )}
+
+                        {/* Camera preview PiP (upgraded with lip overlay) + Gaze cursor dot */}
+                        <GazePiP
+                            enabled={gazeEnabled}
+                            fusionState={fusionState}
+                            lipSyncActive={lipSyncActive}
+                            faceLandmarksRef={faceLandmarksRef}
+                        />
+
+                        {/* Trimodal Status Bar */}
+                        {trimodalActive && <TrimodalStatusBar visible={trimodalActive} />}
+
+                        {/* Voice Reading Status */}
+                        {voiceReadingActive && (
+                            <div className="flex items-center gap-3 px-4 py-2 rounded-xl bg-green-500/10 border border-green-500/20">
+                                <div className="relative flex items-center justify-center">
+                                    <Mic size={16} className="text-green-400" />
+                                    <span className="absolute -top-1 -right-1 w-2 h-2 bg-green-400 rounded-full animate-pulse" />
+                                </div>
+                                <span className="text-sm text-green-300">
+                                    Listening — read aloud and I'll help if you get stuck
+                                </span>
+                                <span className="ml-auto text-xs text-white/40">
+                                    {voiceReadingEngine.getState().wordsRead} words read
+                                </span>
+                            </div>
+                        )}
+
+                        {/* Stuck Word Help Banner */}
+                        {stuckWord && (
+                            <motion.div
+                                initial={{ opacity: 0, y: -10, scale: 0.95 }}
+                                animate={{ opacity: 1, y: 0, scale: 1 }}
+                                exit={{ opacity: 0, y: -10, scale: 0.95 }}
+                                className="rounded-xl p-4 bg-gradient-to-r from-red-500/15 to-orange-500/15 border border-red-400/30"
+                            >
+                                <div className="flex items-start gap-3">
+                                    <Volume2 size={20} className="text-yellow-400 mt-1 shrink-0 animate-pulse" />
+                                    <div className="flex-1">
+                                        <div className="text-sm text-white/60 mb-1">
+                                            {stuckWord.reason === 'silence' && "Looks like you paused — here's help with this word:"}
+                                            {stuckWord.reason === 'reread' && "You've read this word multiple times — let me help:"}
+                                            {stuckWord.reason === 'mispronounced' && "Let me help you pronounce this word:"}
+                                        </div>
+                                        <div className="flex items-baseline gap-4 flex-wrap">
+                                            <span className="text-2xl font-bold text-yellow-300">
+                                                {stuckWord.syllables.length > 1
+                                                    ? stuckWord.syllables.join(' · ')
+                                                    : stuckWord.word
+                                                }
+                                            </span>
+                                            {stuckWord.phonetic && (
+                                                <span className="text-sm font-mono text-indigo-300/80">
+                                                    /{stuckWord.phonetic}/
+                                                </span>
+                                            )}
+                                        </div>
+                                    </div>
+                                    <button
+                                        onClick={() => {
+                                            voiceReadingEngine.dismissStuckWord();
+                                            setStuckWord(null);
+                                        }}
+                                        className="text-xs text-white/40 hover:text-white/70 px-2 py-1 rounded bg-white/5"
+                                    >
+                                        Got it
+                                    </button>
+                                </div>
+                            </motion.div>
+                        )}
+
+                        {/* Reading area with gaze tracking */}
+                        <div className="relative">
+                            <GazeHighlighter
+                                containerRef={textDisplayRef}
+                                currentLine={currentLine}
+                                enabled={gazeReading}
+                            />
+                            <WordHighlighter
+                                containerRef={textDisplayRef}
+                                enabled={gazeReading}
+                                struggleWords={struggleWords}
+                                rereadWords={rereadWordsMap}
+                            />
+                            {/* GazeTTS disabled — VoiceReadingEngine handles pronunciation help */}
+                            <div
+                                ref={textDisplayRef}
+                                className="reading-content p-8 rounded-2xl bg-white/5 border border-white/10"
+                                style={{
+                                    fontFamily: dyslexicFont ? "'OpenDyslexic', sans-serif" : 'inherit',
+                                    fontSize: `${fontSize + fontBoostPx}px`,
+                                    letterSpacing: `${letterSpacing}px`,
+                                    wordSpacing: `${wordSpacing}px`,
+                                    lineHeight: lineHeight,
+                                    maxWidth: '100%',
+                                    position: 'relative',
+                                    transition: 'font-size 0.4s ease-out',
+                                }}
+                            >
+                                {gazeEnabled
+                                    ? splitIntoReadingLines(text).map((lineProps) => {
+                                        // Render individual words within each gaze line for voice tracking
+                                        const lineIdx = lineProps['data-line-index'];
+                                        const lineWords = lineProps.children.split(/\s+/).filter(Boolean);
+                                        const startWordIdx = lineIdx * 12; // wordsPerLine = 12
+                                        return (
+                                            <div
+                                                key={lineProps.key}
+                                                data-line-index={lineIdx}
+                                                className="py-1"
+                                                style={getLineStyle(lineIdx, fontSize)}
+                                            >
+                                                {lineWords.map((w, wi) => renderWord(w, startWordIdx + wi))}
+                                            </div>
+                                        );
+                                    })
+                                    : words.map((word, i) => renderWord(word, i))
+                                }
+                            </div>
+
+                            {/* Phonetic Hints overlay */}
+                            {trimodalActive && (
+                                <PhoneticHintManager
+                                    hints={phoneticHints}
+                                    onHintDismissed={(wordIndex) => {
+                                        setPhoneticHints(prev => prev.filter(h => h.wordIndex !== wordIndex));
+                                    }}
+                                />
+                            )}
                         </div>
+
+                        {/* Pronunciation Feedback toasts */}
+                        {trimodalActive && <PronunciationFeedback visible={trimodalActive} />}
+
+                        {/* Gaze Heatmap */}
+                        {showHeatmap && heatmapSnapshot && (
+                            <motion.div
+                                initial={{ opacity: 0, height: 0 }}
+                                animate={{ opacity: 1, height: 'auto' }}
+                                exit={{ opacity: 0, height: 0 }}
+                                className="rounded-2xl p-6 bg-white/5 border border-white/10"
+                            >
+                                <h3 className="text-sm font-semibold text-white/70 mb-3 flex items-center gap-2">
+                                    <BarChart3 size={16} className="text-indigo-400" />
+                                    Reading Heatmap
+                                </h3>
+                                <GazeHeatmap
+                                    heatmapData={heatmapSnapshot.heatmap || []}
+                                    rereadLines={rereadLines}
+                                    totalLines={heatmapSnapshot.totalLines || 0}
+                                />
+                            </motion.div>
+                        )}
+
+                        {/* Reading Analytics (word-level fusion data) */}
+                        <ReadingAnalytics
+                            visible={showAnalytics && gazeEnabled}
+                            snapshot={heatmapSnapshot}
+                        />
 
                         {/* Stats */}
                         <div className="flex items-center gap-6 text-sm text-white/40">

@@ -29,7 +29,7 @@ def load_model() -> dict:
     f1 = metrics.get("f1", 0.0)
     auc = metrics.get("auc", 0.0)
     model_name = type(pkg["model"]).__name__
-    print(f"✅ Severity model loaded: {model_name} | F1={f1:.3f} | AUC={auc:.3f}")
+    print(f"[OK] Severity model loaded: {model_name} | F1={f1:.3f} | AUC={auc:.3f}")
 
     _package = pkg
     return _package

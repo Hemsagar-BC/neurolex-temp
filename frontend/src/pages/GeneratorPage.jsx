@@ -1,15 +1,41 @@
 // Multi-Modal Learning Content Generator
 // Input: text or PDF → Output: simplified notes, flashcards, quiz, mind map, audio
 
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
 import {
     Wand2, ArrowLeft, FileText, Upload, Loader2,
     BookOpen, Layers, Brain, HelpCircle, Volume2,
-    ChevronLeft, ChevronRight, Check, X, RefreshCw
+    ChevronLeft, ChevronRight, Check, X, RefreshCw, SplitSquareHorizontal,
+    Crosshair, BarChart3, Zap
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { logContentGeneration, logQuizAttempt } from '../services/progressService';
+// Gaze tracking
+import { GazeProvider, useGaze } from '../context/GazeContext';
+import CalibrationWizard from '../components/gaze/CalibrationWizard';
+import GazeHighlighter from '../components/gaze/GazeHighlighter';
+import GazeTTS from '../components/gaze/GazeTTS';
+import GazeHeatmap from '../components/gaze/GazeHeatmap';
+import GazePiP from '../components/gaze/GazePiP';
+import GazeDot from '../components/gaze/GazeDot';
+import WordHighlighter from '../components/gaze/WordHighlighter';
+import ReadingAnalytics from '../components/gaze/ReadingAnalytics';
+import useLineMapper, { splitIntoReadingLines } from '../hooks/useLineMapper';
+import useRereadDetector from '../hooks/useRereadDetector';
+import useAdaptiveTypography from '../hooks/useAdaptiveTypography';
+import {
+    startGazeSession, recordLineGaze, recordRereadEvent,
+    recordAdaptiveLevel, endGazeSession, getCurrentSessionSnapshot,
+    recordWordRead, recordWordStruggle, recordFusionStats,
+} from '../services/gazeAnalytics';
+// Lip sync + fusion
+import LipSyncEngine from '../services/LipSyncEngine';
+import FusionEngine from '../services/FusionEngine';
+import { WordRegistryManager } from '../utils/WordRegistry';
+
+
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
 
@@ -22,8 +48,16 @@ const TABS = [
 ];
 
 export default function GeneratorPage() {
+    return (
+        <GazeProvider>
+            <GeneratorPageInner />
+        </GazeProvider>
+    );
+}
+
+function GeneratorPageInner() {
     const navigate = useNavigate();
-    const { user } = useAuth();
+    const { currentUser: user } = useAuth();
     const [inputText, setInputText] = useState('');
     const [generating, setGenerating] = useState(false);
     const [activeTab, setActiveTab] = useState('notes');
@@ -85,6 +119,14 @@ export default function GeneratorPage() {
             const data = await response.json();
             setOutputs(data);
             setActiveTab('notes');
+
+            // Track content generation in Firebase
+            if (user?.uid) {
+                logContentGeneration(user.uid, {
+                    inputLength: inputText.length,
+                    types: Object.keys(data).filter(k => data[k]),
+                });
+            }
         } catch (err) {
             setError(err.message || 'Failed to generate content.');
         } finally {
@@ -238,9 +280,9 @@ export default function GeneratorPage() {
                                 animate={{ opacity: 1, y: 0 }}
                                 exit={{ opacity: 0, y: -10 }}
                             >
-                                {activeTab === 'notes' && <NotesView content={outputs.simplifiedNotes} />}
+                                {activeTab === 'notes' && <NotesViewGaze content={outputs.simplifiedNotes} />}
                                 {activeTab === 'flashcards' && <FlashcardView cards={outputs.flashcards} />}
-                                {activeTab === 'quiz' && <QuizView questions={outputs.quiz} />}
+                                {activeTab === 'quiz' && <QuizView questions={outputs.quiz} userId={user?.uid} />}
                                 {activeTab === 'mindmap' && <MindMapView data={outputs.mindMap} />}
                                 {activeTab === 'audio' && <AudioView text={outputs.simplifiedNotes} />}
                             </motion.div>
@@ -254,15 +296,422 @@ export default function GeneratorPage() {
 
 // ---- Sub-components ----
 
+function breakIntoSyllables(word) {
+    const punctMatch = word.match(/^([^a-zA-Z]*)(.*?)([^a-zA-Z]*)$/);
+    if (!punctMatch) return word;
+    const [, leadPunct, core, trailPunct] = punctMatch;
+    if (core.length < 6) return word;
+
+    const lower = core.toLowerCase();
+    const syllables = [];
+    let current = '';
+    const vowels = 'aeiouy';
+    const isVowel = (c) => vowels.includes(c);
+
+    for (let i = 0; i < core.length; i++) {
+        current += core[i];
+        if (i < core.length - 1) {
+            const curIsVowel = isVowel(lower[i]);
+            const nextIsVowel = isVowel(lower[i + 1]);
+            if (curIsVowel && !nextIsVowel && i + 2 < core.length && isVowel(lower[i + 2])) {
+                syllables.push(current); current = '';
+            } else if (!curIsVowel && !nextIsVowel && current.length > 1 && i + 1 < core.length - 1) {
+                const blend = lower[i] + lower[i + 1];
+                const commonBlends = ['bl', 'br', 'ch', 'cl', 'cr', 'dr', 'fl', 'fr', 'gl', 'gr', 'ph', 'pl', 'pr', 'sc', 'sh', 'sk', 'sl', 'sm', 'sn', 'sp', 'st', 'sw', 'th', 'tr', 'tw', 'wh', 'wr'];
+                if (!commonBlends.includes(blend)) { syllables.push(current); current = ''; }
+            } else if (!curIsVowel && nextIsVowel && current.length > 2) {
+                const lastChar = current[current.length - 1];
+                syllables.push(current.slice(0, -1)); current = lastChar;
+            }
+        }
+    }
+    if (current) syllables.push(current);
+    if (syllables.length <= 1) return word;
+    return leadPunct + syllables.join('·') + trailPunct;
+}
+
 function NotesView({ content }) {
+    const [syllableMode, setSyllableMode] = useState(false);
+
+    // Strip markdown symbols (# * **) and clean up for plain reading
+    const cleanContent = (text) => {
+        if (!text) return 'No notes generated.';
+        return text
+            .replace(/#{1,6}\s*/g, '')       // Remove # headings
+            .replace(/\*\*([^*]+)\*\*/g, '$1') // Remove **bold** markers
+            .replace(/\*([^*]+)\*/g, '$1')     // Remove *italic* markers
+            .replace(/^[-•]\s*/gm, '  \u2022 ')  // Normalize bullet markers to bullet char
+            .replace(/^\d+\.\s*/gm, (m) => '  ' + m) // Indent numbered lists
+            .trim();
+    };
+
+    const renderText = (text) => {
+        if (!syllableMode) return text;
+        return text.split(/\s+/).map((word, i) => {
+            if (word.replace(/[^a-zA-Z]/g, '').length >= 6) {
+                const broken = breakIntoSyllables(word);
+                const parts = broken.split('·');
+                if (parts.length > 1) {
+                    return (
+                        <span key={i}>
+                            {parts.map((part, pi) => (
+                                <span key={pi}>
+                                    {part}
+                                    {pi < parts.length - 1 && (
+                                        <span className="text-purple-400 font-bold mx-[1px]">·</span>
+                                    )}
+                                </span>
+                            ))}{' '}
+                        </span>
+                    );
+                }
+            }
+            return <span key={i}>{word} </span>;
+        });
+    };
+
+    const lines = cleanContent(content).split('\n');
+
     return (
         <div className="reading-content rounded-2xl p-6 bg-white/5 border border-white/10">
-            <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
-                <FileText size={20} className="text-amber-400" />
-                Simplified Notes
-            </h3>
-            <div className="text-white/80 whitespace-pre-wrap leading-relaxed">
-                {content || 'No notes generated.'}
+            <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-semibold flex items-center gap-2">
+                    <FileText size={20} className="text-amber-400" />
+                    Simplified Notes
+                </h3>
+                <button
+                    onClick={() => setSyllableMode(!syllableMode)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs transition-all"
+                    style={{
+                        background: syllableMode ? 'rgba(168, 85, 247, 0.25)' : 'rgba(255,255,255,0.05)',
+                        border: `1px solid ${syllableMode ? 'rgba(168, 85, 247, 0.4)' : 'rgba(255,255,255,0.1)'}`,
+                        color: syllableMode ? '#c084fc' : 'rgba(255,255,255,0.5)',
+                    }}
+                >
+                    <SplitSquareHorizontal size={14} />
+                    {syllableMode ? 'Syllables ON' : 'Break Down'}
+                </button>
+            </div>
+            <div className="text-white/80 leading-loose space-y-2" style={{ fontSize: '16px' }}>
+                {lines.map((line, i) => {
+                    const trimmed = line.trim();
+                    if (!trimmed) return <div key={i} className="h-2" />;
+                    const isBullet = trimmed.startsWith('\u2022') || /^\d+\./.test(trimmed);
+                    return (
+                        <p key={i} className={isBullet ? 'pl-2' : ''}>
+                            {renderText(trimmed)}
+                        </p>
+                    );
+                })}
+            </div>
+        </div>
+    );
+}
+
+// ---- Gaze-enhanced NotesView ----
+function NotesViewGaze({ content }) {
+    const { startGaze, stopGaze, gazeActive, isCalibrated, setCalibrated, faceLandmarksRef, faceMeshService } = useGaze();
+    const [gazeEnabled, setGazeEnabled] = useState(false);
+    const [showCalibration, setShowCalibration] = useState(false);
+    const [showHeatmap, setShowHeatmap] = useState(false);
+    const [heatmapSnapshot, setHeatmapSnapshot] = useState(null);
+    const [syllableMode, setSyllableMode] = useState(false);
+    const containerRef = useRef(null);
+
+    // Lip sync + fusion state
+    const lipSyncRef = useRef(null);
+    const fusionRef = useRef(null);
+    const registryRef = useRef(null);
+    const fusionLoopRef = useRef(null);
+    const [lipSyncActive, setLipSyncActive] = useState(false);
+    const [fusionState, setFusionState] = useState(null);
+    const [struggleWords, setStruggleWords] = useState(new Set());
+    const [rereadWordsMap, setRereadWordsMap] = useState(new Map());
+    const [showAnalytics, setShowAnalytics] = useState(false);
+
+    const gazeReading = gazeEnabled;
+    const { currentLine, rebuildRects } = useLineMapper(gazeReading ? containerRef : { current: null });
+    const { rereadLines, rereadLog, resetReread } = useRereadDetector(gazeReading ? currentLine : -1, gazeReading);
+    const { getLineStyle, getLineLevel, resetTypography } = useAdaptiveTypography(rereadLines, gazeReading);
+
+    // Analytics
+    useEffect(() => {
+        if (gazeReading && currentLine >= 0) {
+            recordLineGaze(currentLine);
+            const level = getLineLevel(currentLine);
+            if (level > 0) recordAdaptiveLevel(currentLine, level);
+        }
+    }, [currentLine, gazeReading, getLineLevel]);
+
+    useEffect(() => {
+        if (!gazeReading) return;
+        const handler = (e) => {
+            const { lineIndex, count } = e.detail;
+            recordRereadEvent(lineIndex, count);
+        };
+        window.addEventListener('reread', handler);
+        return () => window.removeEventListener('reread', handler);
+    }, [gazeReading]);
+
+    // ---- Lip Sync + Fusion lifecycle ----
+    useEffect(() => {
+        if (!gazeReading) {
+            if (fusionLoopRef.current) cancelAnimationFrame(fusionLoopRef.current);
+            if (lipSyncRef.current) { lipSyncRef.current.destroy(); lipSyncRef.current = null; }
+            if (fusionRef.current) { fusionRef.current.destroy(); fusionRef.current = null; }
+            if (registryRef.current) { registryRef.current.detach(); registryRef.current = null; }
+            setLipSyncActive(false);
+            setFusionState(null);
+            return;
+        }
+
+        const cores = navigator.hardwareConcurrency || 2;
+        const canLipSync = cores >= 4;
+
+        const lipEngine = new LipSyncEngine();
+        const fusionEngine = new FusionEngine();
+        lipSyncRef.current = lipEngine;
+        fusionRef.current = fusionEngine;
+
+        const unsubWord = fusionEngine.onWordChange((detail) => {
+            setFusionState({ confidence: detail.confidence, method: detail.method, text: detail.text });
+            setRereadWordsMap(new Map(fusionEngine.rereadWords));
+            recordWordRead(detail);
+        });
+        const unsubStruggle = fusionEngine.onWordStruggle((detail) => {
+            setStruggleWords(new Set(fusionEngine.struggleWords));
+            recordWordStruggle(detail);
+        });
+
+        let registryAttached = false;
+        const attachRegistry = () => {
+            if (!containerRef.current || registryAttached) return;
+            const reg = new WordRegistryManager();
+            reg.attach(containerRef.current);
+            registryRef.current = reg;
+            registryAttached = true;
+        };
+        const regTimer = setTimeout(attachRegistry, 300);
+
+        // FaceMeshService handles detection; feed lip engine from faceLandmarksRef
+        if (canLipSync) setLipSyncActive(true);
+
+        let lipRunning = true;
+        let lastLipLandmarks = null;
+        const lipPoll = () => {
+            if (!lipRunning) return;
+            const lm = faceLandmarksRef.current;
+            if (lm && lm !== lastLipLandmarks && canLipSync && lipSyncRef.current) {
+                lastLipLandmarks = lm;
+                lipEngine.processFrame(lm);
+            }
+            requestAnimationFrame(lipPoll);
+        };
+        requestAnimationFrame(lipPoll);
+
+        const gazeRef = { x: 0, y: 0 };
+        const gazeHandler = (e) => { gazeRef.x = e.detail.x; gazeRef.y = e.detail.y; };
+        window.addEventListener('gazeupdate', gazeHandler);
+
+        let running = true;
+        const fusionTick = () => {
+            if (!running) return;
+            if (registryRef.current && fusionRef.current) {
+                let lipResult = null;
+                if (lipSyncRef.current && registryRef.current) {
+                    const candidates = registryRef.current.getWordCandidates(gazeRef.x, gazeRef.y);
+                    if (candidates.length > 0) {
+                        const match = lipSyncRef.current.matchWord(candidates.map(c => c.text));
+                        if (match && !match.then && match.word) {
+                            const matched = candidates.find(c => c.text === match.word);
+                            if (matched) {
+                                lipResult = { wordIndex: matched.wordIndex, text: matched.text, confidence: match.confidence || 0.5 };
+                            }
+                        }
+                    }
+                }
+                fusionRef.current.processTick(gazeRef.x, gazeRef.y, lipResult, registryRef.current);
+            }
+            fusionLoopRef.current = requestAnimationFrame(fusionTick);
+        };
+        fusionLoopRef.current = requestAnimationFrame(fusionTick);
+
+        return () => {
+            running = false;
+            lipRunning = false;
+            clearTimeout(regTimer);
+            if (fusionLoopRef.current) cancelAnimationFrame(fusionLoopRef.current);
+            window.removeEventListener('gazeupdate', gazeHandler);
+            unsubWord();
+            unsubStruggle();
+            if (lipSyncRef.current) { lipSyncRef.current.destroy(); lipSyncRef.current = null; }
+            if (fusionRef.current) {
+                recordFusionStats(fusionRef.current.getReadingStats());
+                fusionRef.current.destroy();
+                fusionRef.current = null;
+            }
+            if (registryRef.current) { registryRef.current.detach(); registryRef.current = null; }
+            setLipSyncActive(false);
+        };
+    }, [gazeReading, faceLandmarksRef]);
+
+    const handleToggleGaze = useCallback(async () => {
+        if (gazeEnabled) {
+            if (fusionRef.current) recordFusionStats(fusionRef.current.getReadingStats());
+            stopGaze();
+            setGazeEnabled(false);
+            const snap = getCurrentSessionSnapshot();
+            setHeatmapSnapshot(snap);
+            await endGazeSession();
+            resetReread();
+            resetTypography();
+            setShowAnalytics(false);
+        } else {
+            const ok = await startGaze();
+            if (ok) {
+                setGazeEnabled(true);
+                if (!isCalibrated) setShowCalibration(true);
+                const lines = splitIntoReadingLines(cleanContent(content));
+                startGazeSession('generator', lines.length);
+            }
+        }
+    }, [gazeEnabled, startGaze, stopGaze, isCalibrated, content, resetReread, resetTypography]);
+
+    const cleanContent = (text) => {
+        if (!text) return 'No notes generated.';
+        return text
+            .replace(/#{1,6}\s*/g, '')
+            .replace(/\*\*([^*]+)\*\*/g, '$1')
+            .replace(/\*([^*]+)\*/g, '$1')
+            .replace(/^[-•]\s*/gm, '  \u2022 ')
+            .replace(/^\d+\.\s*/gm, (m) => '  ' + m)
+            .trim();
+    };
+
+    const cleaned = cleanContent(content);
+    const readingLines = splitIntoReadingLines(cleaned);
+
+    return (
+        <div className="reading-content rounded-2xl p-6 bg-white/5 border border-white/10">
+            {showCalibration && (
+                <CalibrationWizard
+                    onComplete={() => setShowCalibration(false)}
+                    onSkip={() => setShowCalibration(false)}
+                />
+            )}
+            <GazePiP enabled={gazeEnabled} fusionState={fusionState} lipSyncActive={lipSyncActive} faceLandmarksRef={faceLandmarksRef} />
+            <GazeDot enabled={gazeEnabled && !showCalibration} />
+            <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-semibold flex items-center gap-2">
+                    <FileText size={20} className="text-amber-400" />
+                    Simplified Notes
+                </h3>
+                <div className="flex items-center gap-2">
+                    <button
+                        onClick={() => setSyllableMode(!syllableMode)}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs transition-all"
+                        style={{
+                            background: syllableMode ? 'rgba(168, 85, 247, 0.25)' : 'rgba(255,255,255,0.05)',
+                            border: `1px solid ${syllableMode ? 'rgba(168, 85, 247, 0.4)' : 'rgba(255,255,255,0.1)'}`,
+                            color: syllableMode ? '#c084fc' : 'rgba(255,255,255,0.5)',
+                        }}
+                    >
+                        <SplitSquareHorizontal size={14} />
+                        {syllableMode ? 'Syllables ON' : 'Break Down'}
+                    </button>
+                    <button
+                        onClick={handleToggleGaze}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs transition-all"
+                        style={{
+                            background: gazeEnabled ? 'rgba(34, 197, 94, 0.2)' : 'rgba(255,255,255,0.05)',
+                            border: `1px solid ${gazeEnabled ? 'rgba(34, 197, 94, 0.4)' : 'rgba(255,255,255,0.1)'}`,
+                            color: gazeEnabled ? '#86efac' : 'rgba(255,255,255,0.5)',
+                        }}
+                    >
+                        <Crosshair size={14} />
+                        {gazeEnabled ? 'Gaze ON' : 'Eye Track'}
+                    </button>
+                    {gazeEnabled && (
+                        <button
+                            onClick={() => {
+                                setHeatmapSnapshot(getCurrentSessionSnapshot());
+                                setShowHeatmap(!showHeatmap);
+                            }}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs transition-all"
+                            style={{
+                                background: showHeatmap ? 'rgba(99,102,241,0.2)' : 'rgba(255,255,255,0.05)',
+                                border: `1px solid ${showHeatmap ? 'rgba(99,102,241,0.4)' : 'rgba(255,255,255,0.1)'}`,
+                                color: showHeatmap ? '#a5b4fc' : 'rgba(255,255,255,0.5)',
+                            }}
+                        >
+                            <BarChart3 size={14} />
+                            Heatmap
+                        </button>
+                    )}
+                    {gazeEnabled && (
+                        <button
+                            onClick={() => {
+                                setHeatmapSnapshot(getCurrentSessionSnapshot());
+                                setShowAnalytics(!showAnalytics);
+                            }}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs transition-all"
+                            style={{
+                                background: showAnalytics ? 'rgba(6,182,212,0.2)' : 'rgba(255,255,255,0.05)',
+                                border: `1px solid ${showAnalytics ? 'rgba(6,182,212,0.4)' : 'rgba(255,255,255,0.1)'}`,
+                                color: showAnalytics ? '#67e8f9' : 'rgba(255,255,255,0.5)',
+                            }}
+                        >
+                            <Zap size={14} />
+                            Analytics
+                        </button>
+                    )}
+                </div>
+            </div>
+
+            <div className="relative">
+                <GazeHighlighter containerRef={containerRef} currentLine={currentLine} enabled={gazeReading} />
+                <WordHighlighter containerRef={containerRef} enabled={gazeReading} struggleWords={struggleWords} rereadWords={rereadWordsMap} />
+                <GazeTTS containerRef={containerRef} enabled={gazeReading} />
+                <div
+                    ref={containerRef}
+                    className="text-white/80 leading-loose space-y-2"
+                    style={{ fontSize: '16px', position: 'relative' }}
+                >
+                    {gazeEnabled
+                        ? readingLines.map((lineProps) => (
+                            <div
+                                key={lineProps.key}
+                                data-line-index={lineProps['data-line-index']}
+                                className="py-1"
+                                style={getLineStyle(lineProps['data-line-index'], 16)}
+                            >
+                                {lineProps.children}
+                            </div>
+                        ))
+                        : cleaned.split('\n').map((line, i) => {
+                            const trimmed = line.trim();
+                            if (!trimmed) return <div key={i} className="h-2" />;
+                            const isBullet = trimmed.startsWith('\u2022') || /^\d+\./.test(trimmed);
+                            return <p key={i} className={isBullet ? 'pl-2' : ''}>{trimmed}</p>;
+                        })
+                    }
+                </div>
+            </div>
+
+            {showHeatmap && heatmapSnapshot && (
+                <div className="mt-4 pt-4 border-t border-white/10">
+                    <GazeHeatmap
+                        heatmapData={heatmapSnapshot.heatmap || []}
+                        rereadLines={rereadLines}
+                        totalLines={heatmapSnapshot.totalLines || 0}
+                        maxHeight="200px"
+                    />
+                </div>
+            )}
+
+            {/* Reading Analytics (word-level fusion data) */}
+            <div className="mt-4">
+                <ReadingAnalytics visible={showAnalytics && gazeEnabled} snapshot={heatmapSnapshot} />
             </div>
         </div>
     );
@@ -288,33 +737,39 @@ function FlashcardView({ cards }) {
             <div
                 onClick={() => setFlipped(!flipped)}
                 className="relative mx-auto max-w-lg cursor-pointer"
-                style={{ perspective: '1000px', minHeight: '200px' }}
+                style={{ minHeight: '200px' }}
             >
-                <motion.div
-                    animate={{ rotateY: flipped ? 180 : 0 }}
-                    transition={{ duration: 0.5 }}
-                    className="w-full rounded-2xl"
-                    style={{ transformStyle: 'preserve-3d' }}
-                >
-                    {/* Front */}
-                    <div
-                        className="rounded-2xl p-8 bg-gradient-to-br from-indigo-500/20 to-purple-500/20 border border-indigo-500/30 text-center"
-                        style={{ backfaceVisibility: flipped ? 'hidden' : 'visible', minHeight: '200px', display: flipped ? 'none' : 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column' }}
-                    >
-                        <div className="text-xs text-indigo-300 mb-3">QUESTION</div>
-                        <div className="text-lg font-medium">{parsedCards[currentIndex]?.front}</div>
-                        <div className="text-xs text-white/30 mt-4">Click to flip</div>
-                    </div>
-                    {/* Back */}
-                    <div
-                        className="rounded-2xl p-8 bg-gradient-to-br from-green-500/20 to-emerald-500/20 border border-green-500/30 text-center"
-                        style={{ backfaceVisibility: !flipped ? 'hidden' : 'visible', minHeight: '200px', display: !flipped ? 'none' : 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column' }}
-                    >
-                        <div className="text-xs text-green-300 mb-3">ANSWER</div>
-                        <div className="text-lg font-medium">{parsedCards[currentIndex]?.back}</div>
-                        <div className="text-xs text-white/30 mt-4">Click to flip back</div>
-                    </div>
-                </motion.div>
+                <AnimatePresence mode="wait">
+                    {!flipped ? (
+                        <motion.div
+                            key="front"
+                            initial={{ opacity: 0, scale: 0.95 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.95 }}
+                            transition={{ duration: 0.25 }}
+                            className="rounded-2xl p-8 bg-gradient-to-br from-indigo-500/20 to-purple-500/20 border border-indigo-500/30 text-center flex items-center justify-center flex-col"
+                            style={{ minHeight: '200px' }}
+                        >
+                            <div className="text-xs text-indigo-300 mb-3">QUESTION</div>
+                            <div className="text-lg font-medium">{parsedCards[currentIndex]?.front}</div>
+                            <div className="text-xs text-white/30 mt-4">Click to see answer</div>
+                        </motion.div>
+                    ) : (
+                        <motion.div
+                            key="back"
+                            initial={{ opacity: 0, scale: 0.95 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.95 }}
+                            transition={{ duration: 0.25 }}
+                            className="rounded-2xl p-8 bg-gradient-to-br from-green-500/20 to-emerald-500/20 border border-green-500/30 text-center flex items-center justify-center flex-col"
+                            style={{ minHeight: '200px' }}
+                        >
+                            <div className="text-xs text-green-300 mb-3">ANSWER</div>
+                            <div className="text-lg font-medium">{parsedCards[currentIndex]?.back}</div>
+                            <div className="text-xs text-white/30 mt-4">Click to see question</div>
+                        </motion.div>
+                    )}
+                </AnimatePresence>
             </div>
             <div className="flex justify-center gap-3">
                 <button onClick={prev} disabled={currentIndex === 0} className="px-4 py-2 rounded-lg bg-white/5 border border-white/10 disabled:opacity-30 transition-colors hover:bg-white/10">
@@ -328,7 +783,7 @@ function FlashcardView({ cards }) {
     );
 }
 
-function QuizView({ questions }) {
+function QuizView({ questions, userId }) {
     const [answers, setAnswers] = useState({});
     const [showResults, setShowResults] = useState(false);
     const parsedQuestions = typeof questions === 'string' ? parseQuiz(questions) : (questions || []);
@@ -390,7 +845,12 @@ function QuizView({ questions }) {
 
             {!showResults ? (
                 <button
-                    onClick={() => setShowResults(true)}
+                    onClick={() => {
+                        setShowResults(true);
+                        // Track quiz attempt in Firebase
+                        const s = parsedQuestions.reduce((acc, q, i) => acc + (answers[i] === q.correct ? 1 : 0), 0);
+                        if (userId) logQuizAttempt(userId, { score: s, totalQuestions: parsedQuestions.length });
+                    }}
                     disabled={Object.keys(answers).length < parsedQuestions.length}
                     className="w-full py-3 rounded-xl font-semibold transition-all disabled:opacity-30"
                     style={{ background: Object.keys(answers).length >= parsedQuestions.length ? 'linear-gradient(135deg, #6366f1, #8b5cf6)' : '#333' }}

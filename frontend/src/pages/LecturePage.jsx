@@ -18,6 +18,7 @@ import {
   processLecture,
   deleteLecture
 } from '../services/backendApi';
+import { logLectureSession } from '../services/progressService';
 
 export default function LecturePage() {
   const { isDark } = useTheme();
@@ -73,11 +74,10 @@ export default function LecturePage() {
           whileHover={{ scale: 1.05 }}
           whileTap={{ scale: 0.95 }}
           onClick={handleTTSClick}
-          className={`flex items-center gap-2 px-4 py-2 rounded-lg font-semibold transition-all ${
-            isDark
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg font-semibold transition-all ${isDark
               ? 'bg-blue-500/20 hover:bg-blue-500/30 text-blue-300 border border-blue-500/50'
               : 'bg-blue-100 hover:bg-blue-200 text-blue-700 border border-blue-300'
-          }`}
+            }`}
         >
           {isSpeaking ? (
             isPaused ? (
@@ -105,11 +105,10 @@ export default function LecturePage() {
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.95 }}
             onClick={handleStop}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg font-semibold transition-all ${
-              isDark
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg font-semibold transition-all ${isDark
                 ? 'bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/50'
                 : 'bg-red-100 hover:bg-red-200 text-red-700 border border-red-300'
-            }`}
+              }`}
           >
             <VolumeX className="w-5 h-5" />
             Stop
@@ -122,7 +121,7 @@ export default function LecturePage() {
   // Load a specific lecture by ID or the latest lecture
   const loadLatestLecture = useCallback(async (lectureId = null) => {
     if (!currentUser) return;
-    
+
     setIsLoadingLecture(true);
     try {
       let lecture;
@@ -131,7 +130,7 @@ export default function LecturePage() {
       } else {
         lecture = await getLatestLecture(currentUser.uid);
       }
-      
+
       if (lecture) {
         setCurrentLectureId(lecture.id);
         setLiveTranscription(lecture.transcription || '');
@@ -152,7 +151,7 @@ export default function LecturePage() {
     const params = new URLSearchParams(window.location.search);
     const lectureId = params.get('id');
     const autoProcess = params.get('autoProcess') === 'true';
-    
+
     if (lectureId) {
       loadLatestLecture(lectureId).then(() => {
         // Auto-process if requested (from audio upload)
@@ -202,25 +201,25 @@ export default function LecturePage() {
   // Process transcription through backend API (memoized)
   const processTranscription = useCallback(async (lectureId) => {
     if (!lectureId) return;
-    
+
     setIsProcessing(true);
     setLoadingBreakdown(true);
     setLoadingSteps(true);
     setLoadingMindMap(true);
     setLoadingSummary(true);
-    
+
     try {
       setProcessingStage('Processing lecture through AI...');
-      
+
       // Call backend API to process all stages
       const result = await processLecture(lectureId);
-      
+
       // Update local state with results
       setBreakdownText(result.simpleText);
       setDetailedSteps(result.detailedSteps);
       setMindMap(result.mindMap);
       setSummary(result.summary);
-      
+
       setProcessingStage('Processing complete!');
     } catch (error) {
       console.error('Error processing transcription:', error);
@@ -256,11 +255,14 @@ export default function LecturePage() {
       setProcessingStage('Saving transcription...');
       const lectureId = await createLecture(currentUser.uid, transcription);
       setCurrentLectureId(lectureId);
-      
+
+      // Track lecture creation in Firebase
+      logLectureSession(currentUser.uid, { lectureId });
+
       // Auto-trigger AI processing immediately after saving
       setProcessingStage('Processing with AI...');
       await processTranscription(lectureId);
-      
+
     } catch (error) {
       console.error('Error saving or processing transcription:', error);
       alert('Failed to save transcription. Please try again.');
@@ -281,11 +283,10 @@ export default function LecturePage() {
             {liveTranscription && currentLectureId && !isRecording && (
               <button
                 onClick={() => processTranscription(currentLectureId)}
-                className={`mt-4 px-6 py-2 rounded-lg font-medium transition-all ${
-                  isDark
+                className={`mt-4 px-6 py-2 rounded-lg font-medium transition-all ${isDark
                     ? 'bg-blue-600 hover:bg-blue-700 text-white'
                     : 'bg-blue-500 hover:bg-blue-600 text-white'
-                }`}
+                  }`}
                 disabled={isProcessing}
               >
                 {isProcessing ? 'Processing...' : 'Process with AI'}
@@ -293,7 +294,7 @@ export default function LecturePage() {
             )}
           </div>
         );
-      
+
       case 'breakdown':
         return (
           <div className="space-y-4">
@@ -315,7 +316,7 @@ export default function LecturePage() {
             )}
           </div>
         );
-      
+
       case 'steps':
         return (
           <div className="space-y-4">
@@ -337,7 +338,7 @@ export default function LecturePage() {
             )}
           </div>
         );
-      
+
       case 'mindmap':
         return (
           <div className="space-y-4">
@@ -359,7 +360,7 @@ export default function LecturePage() {
             )}
           </div>
         );
-      
+
       case 'summary':
         return (
           <div className="space-y-4">
@@ -381,16 +382,15 @@ export default function LecturePage() {
             )}
           </div>
         );
-      
+
       default:
         return null;
     }
   };
 
   return (
-    <div className={`min-h-screen relative overflow-hidden transition-colors duration-500 ${
-      isDark ? 'bg-black' : 'bg-gray-50'
-    }`}>
+    <div className={`min-h-screen relative overflow-hidden transition-colors duration-500 ${isDark ? 'bg-black' : 'bg-gray-50'
+      }`}>
       {/* Silk Background */}
       {isDark ? (
         <>
@@ -418,7 +418,7 @@ export default function LecturePage() {
       <div className="relative z-10 min-h-screen px-3 sm:px-4 md:px-6 lg:px-8 py-6 md:py-8">
         <div className="w-full mx-auto max-w-7xl">
           {/* Header */}
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0, y: -20 }}
             animate={{ opacity: 1, y: 0 }}
             className="mb-6 md:mb-8 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4"
@@ -437,11 +437,10 @@ export default function LecturePage() {
                 whileHover={{ scale: 1.05 }}
                 whileTap={{ scale: 0.95 }}
                 onClick={handleClearLecture}
-                className={`flex items-center gap-2 px-3 sm:px-4 py-2 md:py-3 rounded-lg font-semibold transition-all flex-shrink-0 touch-target ${
-                  isDark 
-                    ? 'bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/50' 
+                className={`flex items-center gap-2 px-3 sm:px-4 py-2 md:py-3 rounded-lg font-semibold transition-all flex-shrink-0 touch-target ${isDark
+                    ? 'bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/50'
                     : 'bg-red-100 hover:bg-red-200 text-red-700 border border-red-300'
-                }`}
+                  }`}
               >
                 <Trash2 className="w-4 sm:w-5 h-4 sm:h-5" />
                 <span className="hidden sm:inline">Delete</span>
@@ -451,7 +450,7 @@ export default function LecturePage() {
 
           {/* Processing Status */}
           {isProcessing && (
-            <motion.div 
+            <motion.div
               initial={{ opacity: 0, y: -10 }}
               animate={{ opacity: 1, y: 0 }}
               className={`mb-6 p-4 rounded-lg ${isDark ? 'bg-blue-500/20 border border-blue-500/50' : 'bg-blue-100 border border-blue-300'}`}
@@ -466,13 +465,13 @@ export default function LecturePage() {
           {/* Side-by-Side Layout - Stack on mobile */}
           <div className="grid grid-cols-1 lg:grid-cols-4 gap-4 md:gap-6">
             {/* Left: Audio Recorder - 1/4 width */}
-            <motion.div 
+            <motion.div
               initial={{ opacity: 0, x: -50 }}
               animate={{ opacity: 1, x: 0 }}
               transition={{ delay: 0.2 }}
               className="lg:col-span-1"
             >
-              <AudioRecorder 
+              <AudioRecorder
                 onRecordingComplete={handleRecordingComplete}
                 onTranscriptionUpdate={handleTranscriptionUpdate}
                 onRecordingStateChange={setIsRecording}
@@ -480,15 +479,14 @@ export default function LecturePage() {
             </motion.div>
 
             {/* Right: Tabs */}
-            <motion.div 
+            <motion.div
               initial={{ opacity: 0, x: 50 }}
               animate={{ opacity: 1, x: 0 }}
               transition={{ delay: 0.3 }}
-              className={`backdrop-blur-md rounded-3xl shadow-2xl border-2 overflow-hidden lg:col-span-3 ${
-                isDark 
-                  ? 'bg-white/10 border-white/20' 
+              className={`backdrop-blur-md rounded-3xl shadow-2xl border-2 overflow-hidden lg:col-span-3 ${isDark
+                  ? 'bg-white/10 border-white/20'
                   : 'bg-white/70 border-white/40'
-              }`}
+                }`}
             >
               {/* Tab Headers */}
               <div className={`flex gap-0 overflow-x-auto scrollbar-hide border-b ${isDark ? 'border-white/20' : 'border-gray-300'}`}>
@@ -496,15 +494,14 @@ export default function LecturePage() {
                   <button
                     key={tab.id}
                     onClick={() => setActiveTab(tab.id)}
-                    className={`flex-shrink-0 min-w-max px-2 sm:px-3 md:px-4 py-3 md:py-4 text-xs sm:text-sm font-semibold transition-all whitespace-nowrap touch-target ${
-                      activeTab === tab.id
+                    className={`flex-shrink-0 min-w-max px-2 sm:px-3 md:px-4 py-3 md:py-4 text-xs sm:text-sm font-semibold transition-all whitespace-nowrap touch-target ${activeTab === tab.id
                         ? isDark
                           ? 'bg-white/20 text-white border-b-2 border-blue-400'
                           : 'bg-white/90 text-gray-900 border-b-2 border-blue-600'
                         : isDark
                           ? 'text-gray-300 hover:bg-white/10'
                           : 'text-gray-600 hover:bg-white/50'
-                    }`}
+                      }`}
                   >
                     <span className="mr-1">{tab.icon}</span>
                     <span className="hidden sm:inline">{tab.label}</span>

@@ -12,13 +12,14 @@ import {
     AlignLeft, Ruler, SpellCheck, Scaling, Eye
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { logHandwritingUpload } from '../services/progressService';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
 
 export default function HandwritingPage() {
     const navigate = useNavigate();
-    const { user } = useAuth();
+    const { currentUser: user } = useAuth();
     const [image, setImage] = useState(null);
     const [imagePreview, setImagePreview] = useState(null);
     const [analyzing, setAnalyzing] = useState(false);
@@ -78,13 +79,23 @@ export default function HandwritingPage() {
 
             if (!response.ok) {
                 if (response.status === 429) {
-                    throw new Error('AI service is busy (rate limit). Please wait 1-2 minutes and try again.');
+                    throw new Error('AI service is busy (rate limit). The backend is retrying automatically — please wait 30-60 seconds and try again.');
                 }
-                throw new Error('Analysis failed. Please try again.');
+                const errText = await response.text().catch(() => '');
+                throw new Error(errText || 'Analysis failed. Please try again.');
             }
 
             const data = await response.json();
             setResults(data);
+
+            // Track handwriting analysis in Firebase
+            if (user?.uid) {
+                logHandwritingUpload(user.uid, {
+                    errorCount: data.errors?.length || 0,
+                    score: data.overall_score || 0,
+                    errors: (data.errors || []).map(e => e.type || e.category || 'unknown'),
+                });
+            }
         } catch (err) {
             setError(err.message || 'Failed to analyze handwriting.');
         } finally {
