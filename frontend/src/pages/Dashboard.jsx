@@ -305,7 +305,7 @@ export default function Dashboard() {
           {/* AI Features Grid */}
           <div className="mb-6 md:mb-8">
             <h2 className="text-xl sm:text-2xl font-bold text-white mb-4 drop-shadow-lg">🧠 AI Learning Tools</h2>
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+            <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
               {/* Reading Assistant */}
               <Link to="/reading" className="group">
                 <div className="bg-gradient-to-br from-indigo-600/30 to-blue-600/30 backdrop-blur-sm border-2 border-indigo-400/30 p-4 sm:p-5 rounded-xl sm:rounded-2xl shadow-lg hover:shadow-xl hover:border-indigo-400/60 hover:scale-105 transition-all duration-300 h-full">
@@ -348,6 +348,15 @@ export default function Dashboard() {
                   <div className="text-3xl sm:text-4xl mb-2 sm:mb-3">🧠</div>
                   <h3 className="text-sm sm:text-base font-bold text-white mb-1">Dyslexia Screening</h3>
                   <p className="text-xs text-gray-300">Quick assessment & personalized tips</p>
+                </div>
+              </Link>
+
+              {/* Therapy Games */}
+              <Link to="/games" className="group">
+                <div className="bg-gradient-to-br from-cyan-600/30 to-blue-600/30 backdrop-blur-sm border-2 border-cyan-400/30 p-4 sm:p-5 rounded-xl sm:rounded-2xl shadow-lg hover:shadow-xl hover:border-cyan-400/60 hover:scale-105 transition-all duration-300 h-full">
+                  <div className="text-3xl sm:text-4xl mb-2 sm:mb-3">🎮</div>
+                  <h3 className="text-sm sm:text-base font-bold text-white mb-1">Therapy Games</h3>
+                  <p className="text-xs text-gray-300">Fun adaptive games for reading & focus</p>
                 </div>
               </Link>
             </div>

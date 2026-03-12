@@ -25,6 +25,7 @@ except ImportError:
     print("⚠️  Pillow not installed — handwriting image enhancement disabled")
 
 from app.routers import assessment as assessment_router
+from app.routers import games as games_router
 from app.services.severity_model import load_model as load_severity_model
 
 # Global rate limiter for Gemini API (free tier: ~15 RPM)
@@ -90,6 +91,7 @@ db = firestore.client()
 
 # Register assessment screening router
 app.include_router(assessment_router.router)
+app.include_router(games_router.router)
 
 # Preload ML severity model at startup
 try:

@@ -43,6 +43,9 @@ export default function Navbar() {
             <Link to="/dashboard" className="text-gray-300 hover:text-white font-semibold transition-colors text-sm lg:text-base">
               Dashboard
             </Link>
+            <Link to="/games" className="text-gray-300 hover:text-white font-semibold transition-colors text-sm lg:text-base">
+              Games
+            </Link>
             <Link to="/about" className="text-gray-300 hover:text-white font-semibold transition-colors text-sm lg:text-base">
               About
             </Link>
@@ -143,6 +146,9 @@ export default function Navbar() {
             </a>
             <Link to="/dashboard" onClick={() => setMobileMenuOpen(false)} className={`block py-2 px-2 rounded text-base sm:text-lg ${isDark ? 'text-gray-300 hover:text-white hover:bg-gray-700' : 'text-textDark hover:text-primary hover:bg-gray-100'} font-semibold transition-colors`}>
               Dashboard
+            </Link>
+            <Link to="/games" onClick={() => setMobileMenuOpen(false)} className={`block py-2 px-2 rounded text-base sm:text-lg ${isDark ? 'text-gray-300 hover:text-white hover:bg-gray-700' : 'text-textDark hover:text-primary hover:bg-gray-100'} font-semibold transition-colors`}>
+              Games
             </Link>
             <Link to="/about" onClick={() => setMobileMenuOpen(false)} className={`block py-2 px-2 rounded text-base sm:text-lg ${isDark ? 'text-gray-300 hover:text-white hover:bg-gray-700' : 'text-textDark hover:text-primary hover:bg-gray-100'} font-semibold transition-colors`}>
               About

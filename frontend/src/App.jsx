@@ -16,6 +16,12 @@ import HandwritingPage from './pages/HandwritingPage';
 import GeneratorPage from './pages/GeneratorPage';
 import AnalyticsPage from './pages/AnalyticsPage';
 import Onboarding from './pages/Onboarding';
+import GamesHub from './pages/games/GamesHub';
+import DotConnector from './pages/games/DotConnector';
+import MonolinePuzzle from './pages/games/MonolinePuzzle';
+import NBackChallenge from './pages/games/NBackChallenge';
+import ClapTrap from './pages/games/ClapTrap';
+import InhibitionStroop from './pages/games/InhibitionStroop';
 import ProtectedRoute from './components/common/ProtectedRoute';
 import AccessibilityToolbar from './components/common/AccessibilityToolbar';
 import DyslexiaProvider from './components/common/DyslexiaProvider';
@@ -83,6 +89,54 @@ export default function App() {
                 }
               />
               <Route path="/onboarding" element={<Onboarding />} />
+              <Route
+                path="/games"
+                element={
+                  <ProtectedRoute>
+                    <GamesHub />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/games/dot-connector"
+                element={
+                  <ProtectedRoute>
+                    <DotConnector />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/games/monoline"
+                element={
+                  <ProtectedRoute>
+                    <MonolinePuzzle />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/games/nback"
+                element={
+                  <ProtectedRoute>
+                    <NBackChallenge />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/games/clap-trap"
+                element={
+                  <ProtectedRoute>
+                    <ClapTrap />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/games/stroop"
+                element={
+                  <ProtectedRoute>
+                    <InhibitionStroop />
+                  </ProtectedRoute>
+                }
+              />
             </Routes>
           </Router>
           <AccessibilityToolbar />
