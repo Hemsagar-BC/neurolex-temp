@@ -44,7 +44,7 @@ from app.services.severity_model import load_model as load_severity_model
 # Global rate limiter for Gemini API (free tier: ~15 RPM for 2.0-flash)
 _gemini_lock = threading.Lock()
 _last_gemini_call = 0
-MIN_CALL_INTERVAL = 4  # seconds between Gemini API calls (conservative for free tier)
+MIN_CALL_INTERVAL = 1  # 1s stagger for parallel calls — retry handles 429s
 
 # Load environment variables
 load_dotenv()
@@ -217,25 +217,24 @@ def generate_with_gemini(prompt: str, system: str = None, stream: bool = False) 
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {
             "temperature": 0.3,
-            "maxOutputTokens": 4096
+            "maxOutputTokens": 2048
         }
     }
-    
-    max_retries = 5
+
+    max_retries = 2
     for attempt in range(max_retries):
         try:
             _throttle_gemini()
             url = f"{GEMINI_API_BASE}/{GEMINI_MODEL}:generateContent?key={_get_gemini_key()}"
-            response = requests.post(url, headers=headers, json=payload, timeout=90)
-            
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
+
             if response.status_code == 429:
-                # Try rotating to next key first
                 _rotate_gemini_key()
                 retry_after = response.headers.get('Retry-After')
                 if retry_after:
-                    wait_time = min(int(retry_after), 90)
+                    wait_time = min(int(retry_after), 20)
                 else:
-                    wait_time = min((2 ** attempt) * 10, 90)  # 10s, 20s, 40s, 80s, 90s
+                    wait_time = min((2 ** attempt) * 5, 20)  # 5s, 10s
                 print(f"[RATE] Rate limited (attempt {attempt+1}/{max_retries}), waiting {wait_time}s...")
                 time.sleep(wait_time)
                 continue

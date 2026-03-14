@@ -5,6 +5,7 @@ Part of SimplifiED backend (split from main.py)
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from typing import Optional, Callable, Any
 from datetime import datetime
 import time
 import traceback
@@ -22,11 +23,11 @@ class LectureCreate(BaseModel):
     transcription: str
 
 class LectureUpdate(BaseModel):
-    transcription: str = None
-    simpleText: str = None
-    detailedSteps: str = None
-    mindMap: str = None
-    summary: str = None
+    transcription: Optional[str] = None
+    simpleText: Optional[str] = None
+    detailedSteps: Optional[str] = None
+    mindMap: Optional[str] = None
+    summary: Optional[str] = None
 
 class ContentTransformRequest(BaseModel):
     text: str
@@ -35,10 +36,10 @@ class ContentTransformRequest(BaseModel):
 
 # ── Shared state (injected from main.py) ──────────────────────────────────────
 
-_db = None
-_generate_fn = None
+_db: Any = None
+_generate_fn: Optional[Callable[..., str]] = None
 
-def init(db, generate_with_gemini):
+def init(db: Any, generate_with_gemini: Callable[..., str]) -> None:
     """Call this from main.py to inject shared dependencies."""
     global _db, _generate_fn
     _db = db
@@ -139,7 +140,7 @@ async def get_user_lectures(user_id: str):
 async def update_lecture(lecture_id: str, updates: LectureUpdate):
     """Update lecture fields."""
     try:
-        update_data = {k: v for k, v in updates.dict().items() if v is not None}
+        update_data = {k: v for k, v in updates.model_dump().items() if v is not None}
         update_data["updatedAt"] = datetime.now()
         _db.collection("lectures").document(lecture_id).update(update_data)
         doc = _db.collection("lectures").document(lecture_id).get()
@@ -162,6 +163,8 @@ async def delete_lecture(lecture_id: str):
 async def process_lecture(lecture_id: str):
     """Process lecture transcription through Gemini AI."""
     try:
+        if _generate_fn is None:
+            raise HTTPException(status_code=500, detail="AI generate function not initialized")
         doc = _db.collection("lectures").document(lecture_id).get()
         if not doc.exists:
             raise HTTPException(status_code=404, detail="Lecture not found")
@@ -232,6 +235,8 @@ Summary:"""
 async def transform_content(request: ContentTransformRequest):
     """Transform educational content into simplified notes, flashcards, quiz, mind map."""
     try:
+        if _generate_fn is None:
+            raise HTTPException(status_code=500, detail="AI generate function not initialized")
         text = request.text
         if not text.strip():
             raise HTTPException(status_code=400, detail="No text provided")
@@ -241,14 +246,14 @@ async def transform_content(request: ContentTransformRequest):
         short_text = text[:200] if len(text) > 200 else text
 
         # ── Fallback content ──────────────────────────────────────────────────
-        fallback_notes = f"""SIMPLIFIED NOTES\n\nMain Topic: {short_text[:80]}...\n\nKey Points:\n- Read the text carefully\n- Look for important ideas\n- Break them into smaller parts\n\nWhy This Matters:\nUnderstanding the basic ideas helps you learn better and remember longer."""
+        fallback_notes = f"""SIMPLIFIED NOTES\n\nMain Topic: {short_text[:60]}...\n\nKey Points:\n- Read the text carefully\n- Look for important ideas\n- Break them into smaller parts\n\nWhy This Matters:\nUnderstanding the basic ideas helps you learn better and remember longer."""
         fallback_flashcards = "Q: What is the main topic?\nA: The content covers important concepts you need to understand.\n\nQ: Why should you study this?\nA: Because it helps you learn and remember better."
         fallback_quiz = "1. What is the main idea?\nA. Not important\nB. Something you need to learn (correct)\nC. Only for smart students\nD. A waste of time"
         fallback_mindmap = "Main Topic\n├─ Key Ideas\n│  ├─ Idea 1\n│  └─ Idea 2\n└─ Examples\n   └─ Example 1"
 
         # ── Prompts ───────────────────────────────────────────────────────────
         notes_prompt = f"""You are a teacher helping a dyslexic student. Rewrite in simple, detailed notes.
-Rules: simple words, short sentences (max 15 words), bullet points with dashes, NO markdown symbols, plain text headings only, min 300 words, cover ALL main ideas.
+Rules: simple words, short sentences (max 15 words), bullet points with dashes, NO markdown symbols, plain text headings only, min 50 words, cover ALL main ideas.
 Text: {text}\nSimplified notes:"""
 
         flashcard_prompt = f"""Create 8-10 flashcards for a dyslexic student.
@@ -286,7 +291,7 @@ Text: {text}\nMind Map:"""
 
             for label, future in [("notes", nf), ("flashcards", ff), ("quiz", qf), ("mindmap", mf)]:
                 try:
-                    result = future.result()
+                    result = future.result(timeout=45)
                     if label == "notes":        simplified_notes = result
                     elif label == "flashcards": flashcards = result
                     elif label == "quiz":       quiz = result
@@ -327,6 +332,8 @@ class RecommendationRequest(BaseModel):
 async def get_recommendations(request: RecommendationRequest):
     """Generate AI-powered learning recommendations based on user stats."""
     try:
+        if _generate_fn is None:
+            raise HTTPException(status_code=500, detail="AI generate function not initialized")
         import json
         prompt = f"""Based on these learning statistics for a dyslexic student, provide 4-5 personalized practice recommendations:
 - Reading sessions: {request.readingSessions}
