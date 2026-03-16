@@ -11,6 +11,7 @@ import {
   GraduationCap,
   Linkedin,
   Instagram,
+  Github,
   ArrowRight,
 } from "lucide-react";
 import Footer from "@/components/layout/Footer";
@@ -66,6 +67,7 @@ const teamMembers = [
     linkedin:
       "https://www.linkedin.com/in/pushkar-r-deshpande-510177334?utm_source=share&utm_campaign=share_via&utm_content=profile&utm_medium=android_app",
     instagram: "https://www.instagram.com/pushkar__deshpande?igsh=MWdwbmlwcDF4amUwcg==",
+    github: "https://github.com/pushkarrd",
   },
   {
     name: "Hemsagar B C",
@@ -76,6 +78,7 @@ const teamMembers = [
     linkedin:
       "https://www.linkedin.com/in/hemsagar-b-c-b2610a318?utm_source=share&utm_campaign=share_via&utm_content=profile&utm_medium=android_app",
     instagram: "https://www.instagram.com/hemsagar_36?igsh=dWcxa3pteG5kcWdr",
+    github: "https://github.com/hemsagar-b-c",
   },
 ];
 
@@ -247,6 +250,15 @@ export default function Landing() {
                 <p className="text-xs md:text-sm text-muted-foreground/90 mb-5">{member.college}</p>
 
                 <div className="flex gap-3">
+                  <a
+                    href={member.github}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm font-medium text-foreground hover:bg-accent transition-colors"
+                    aria-label={`${member.name} GitHub`}
+                  >
+                    <Github className="w-4 h-4" /> GitHub
+                  </a>
                   <a
                     href={member.linkedin}
                     target="_blank"
