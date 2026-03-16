@@ -291,7 +291,10 @@ NEXT_PUBLIC_BACKEND_URL=http://localhost:8001
 
 ```env
 GEMINI_API_KEY=
-FIREBASE_CREDENTIALS=path/to/serviceAccountKey.json
+FIREBASE_SERVICE_ACCOUNT_PATH=./serviceAccountKey.json
+# For Railway: set FIREBASE_SERVICE_ACCOUNT_JSON instead of file path
+FIREBASE_SERVICE_ACCOUNT_JSON=
+ASSEMBLYAI_API_KEY=
 ```
 
 ---

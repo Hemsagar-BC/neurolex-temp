@@ -98,7 +98,23 @@ app.add_middleware(
 )
 
 # Initialize Firebase Admin SDK
-cred = credentials.Certificate("serviceAccountKey.json")
+firebase_service_account_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "").strip()
+firebase_service_account_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH", "serviceAccountKey.json").strip()
+
+if firebase_service_account_json:
+    try:
+        service_account_info = json.loads(firebase_service_account_json)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Invalid FIREBASE_SERVICE_ACCOUNT_JSON. Must be valid JSON.") from exc
+    cred = credentials.Certificate(service_account_info)
+else:
+    if not os.path.exists(firebase_service_account_path):
+        raise RuntimeError(
+            "Firebase credentials not found. Set FIREBASE_SERVICE_ACCOUNT_JSON or "
+            "FIREBASE_SERVICE_ACCOUNT_PATH."
+        )
+    cred = credentials.Certificate(firebase_service_account_path)
+
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
@@ -496,7 +512,7 @@ async def transcribe_audio(file: UploadFile = File(...)):
         if not api_key:
             raise HTTPException(
                 status_code=500, 
-                detail="AssemblyAI API key not configured. Please add ASSEMBLYAI_API_KEY to .env file."
+                detail="AssemblyAI API key not configured. Set ASSEMBLYAI_API_KEY in environment variables."
             )
         
         # Read file content
