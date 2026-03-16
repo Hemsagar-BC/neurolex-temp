@@ -48,6 +48,12 @@ export function useGoogleAuth() {
     } catch (popupErr: any) {
       const popupCode = popupErr?.code || "";
 
+      if (popupCode === "auth/unauthorized-domain") {
+        throw new Error(
+          "This domain is not authorized in Firebase Auth. Add this Vercel domain in Firebase Console > Authentication > Settings > Authorized domains."
+        );
+      }
+
       // If popup is blocked/closed or operation cancelled, stop early with readable errors.
       if (
         popupCode === "auth/popup-blocked" ||
@@ -56,7 +62,13 @@ export function useGoogleAuth() {
       ) {
         throw new Error(popupErr?.message || "Google sign-in popup was blocked or closed.");
       }
-      // Otherwise continue to GIS fallback below.
+      // Only continue to GIS fallback for popup flow issues.
+      if (
+        popupCode !== "auth/internal-error" &&
+        popupCode !== "auth/network-request-failed"
+      ) {
+        throw new Error(popupErr?.message || "Google sign-in failed.");
+      }
     }
 
     const clientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
