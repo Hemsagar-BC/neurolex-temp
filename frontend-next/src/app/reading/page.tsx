@@ -29,6 +29,7 @@ import {
     startGazeSession, recordLineGaze, recordRereadEvent,
     recordAdaptiveLevel, endGazeSession, getCurrentSessionSnapshot,
 } from '@/services/gazeAnalytics';
+import { getBackendBaseUrl } from '@/lib/api';
 
 // Wrapper that provides gaze context
 export default function ReadingPage() {
@@ -365,7 +366,7 @@ function ReadingPageInner() {
             }
             if (current.trim()) chunks.push(current.trim());
 
-            const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8001';
+            const backendUrl = getBackendBaseUrl();
             let chunkIdx = 0;
             let wordIdx = 0;
 

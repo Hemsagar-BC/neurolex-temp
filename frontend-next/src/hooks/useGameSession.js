@@ -3,8 +3,9 @@ import axios from "axios";
 import { calculateNextDifficulty } from "../utils/difficultyEngine";
 import { auth } from "../services/firebase";
 import { logQuizAttempt } from "../services/progressService";
+import { getBackendBaseUrl } from "../lib/api";
 
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API = getBackendBaseUrl();
 
 export default function useGameSession(gameType, userId) {
   const [sessionId, setSessionId] = useState(null);

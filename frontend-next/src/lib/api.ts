@@ -1,30 +1,35 @@
 const LOCAL_API_FALLBACK = "http://localhost:8000/api";
 
 function normalizeHttpUrl(rawUrl: string): string {
-  let url = rawUrl.trim().replace(/\/+$/, "");
+    let url = rawUrl.trim().replace(/\/+$/, "");
 
-  // Accept values like "my-backend.up.railway.app" by prefixing https.
-  if (!/^https?:\/\//i.test(url)) {
-    url = `https://${url}`;
-  }
+    // Accept values like "my-backend.up.railway.app" by prefixing https.
+    if (!/^https?:\/\//i.test(url)) {
+        url = `https://${url}`;
+    }
 
-  return url;
+    return url;
 }
 
 function ensureApiSuffix(url: string): string {
-  return /\/api$/i.test(url) ? url : `${url}/api`;
+    return /\/api$/i.test(url) ? url : `${url}/api`;
 }
 
 export function getApiBaseUrl(): string {
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL;
-  if (apiUrl?.trim()) {
-    return ensureApiSuffix(normalizeHttpUrl(apiUrl));
-  }
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+    if (apiUrl?.trim()) {
+        return ensureApiSuffix(normalizeHttpUrl(apiUrl));
+    }
 
-  const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL;
-  if (backendUrl?.trim()) {
-    return ensureApiSuffix(normalizeHttpUrl(backendUrl));
-  }
+    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL;
+    if (backendUrl?.trim()) {
+        return ensureApiSuffix(normalizeHttpUrl(backendUrl));
+    }
 
-  return LOCAL_API_FALLBACK;
+    return LOCAL_API_FALLBACK;
+}
+
+export function getBackendBaseUrl(): string {
+    const apiBase = getApiBaseUrl();
+    return apiBase.replace(/\/api$/i, "");
 }

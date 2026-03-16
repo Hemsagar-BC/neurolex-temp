@@ -4,6 +4,7 @@
 import React, { useState, useRef } from 'react';
 import { Upload, X, FileAudio, Loader2 } from 'lucide-react';
 import { useTheme } from '../../context/ThemeContext';
+import { getBackendBaseUrl } from '../../lib/api';
 
 export default function AudioUpload({ onUploadComplete, onClose }) {
   const { isDark } = useTheme();
@@ -70,8 +71,7 @@ export default function AudioUpload({ onUploadComplete, onClose }) {
       setTranscriptionProgress('Processing audio with AI...');
 
       // Send to backend API - use environment variable
-      const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api';
-      const apiUrl = API_BASE_URL.replace('/api', '') + '/api/transcribe-audio';
+      const apiUrl = `${getBackendBaseUrl()}/api/transcribe-audio`;
 
       const response = await fetch(apiUrl, {
         method: 'POST',

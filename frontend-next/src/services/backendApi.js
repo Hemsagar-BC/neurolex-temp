@@ -1,7 +1,9 @@
 // Backend API service for lecture operations
 // Calls Python FastAPI backend with Gemini AI integration
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api';
+import { getApiBaseUrl } from '@/lib/api';
+
+const API_BASE_URL = getApiBaseUrl();
 
 /**
  * Create a new lecture with transcription
