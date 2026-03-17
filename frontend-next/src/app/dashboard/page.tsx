@@ -129,8 +129,8 @@ export default function Dashboard() {
   };
 
   return (
-    <div className="min-h-screen">
-      <div className="w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 md:py-8 space-y-6 content-blur-card p-4 sm:p-6 md:p-8 m-4">
+    <div className="min-h-full">
+      <div className="mx-auto my-3 w-[calc(100%-1rem)] max-w-7xl space-y-6 rounded-2xl p-4 sm:my-4 sm:w-[calc(100%-2rem)] sm:p-6 md:p-8 content-blur-card">
 
         {/* Welcome Banner */}
         <motion.div
@@ -142,10 +142,10 @@ export default function Dashboard() {
                      border border-violet-500/40 backdrop-blur-xl shadow-xl"
         >
           <div>
-            <h1 className="text-3xl md:text-4xl font-extrabold text-foreground drop-shadow-md">
+            <h1 className="text-2xl sm:text-3xl md:text-4xl font-extrabold text-foreground drop-shadow-md">
               Welcome back, {getUserFirstName()}! 👋
             </h1>
-            <p className="text-foreground/70 mt-1 text-base font-medium">
+            <p className="mt-1 text-sm sm:text-base text-foreground/80 font-medium">
               Ready to make learning easier today?
             </p>
           </div>
@@ -163,7 +163,7 @@ export default function Dashboard() {
         </motion.div>
 
         {/* Real-time Stats */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 min-[480px]:grid-cols-2 md:grid-cols-4 gap-4">
           {[
             { icon: Flame, label: "Day Streak", value: visitData.currentStreak, unit: "consecutive days", color: "text-orange-400", bg: "from-orange-500/25 to-red-500/15", border: "border-orange-500/35" },
             { icon: Eye, label: "Today's Visits", value: visitData.todayVisits, unit: "times today", color: "text-indigo-400", bg: "from-indigo-500/25 to-blue-500/15", border: "border-indigo-500/35" },
@@ -180,7 +180,7 @@ export default function Dashboard() {
                 <Icon className={`w-4 h-4 ${color}`} />
                 <span className="text-xs font-semibold text-foreground/60 uppercase tracking-wide">{label}</span>
               </div>
-              <p className={`text-4xl font-black ${color} drop-shadow`}>{value}</p>
+              <p className={`text-3xl sm:text-4xl font-black ${color} drop-shadow`}>{value}</p>
               <p className="text-xs text-foreground/50 mt-1 font-medium">{unit}</p>
             </motion.div>
           ))}

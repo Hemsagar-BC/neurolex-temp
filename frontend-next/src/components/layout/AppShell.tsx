@@ -17,9 +17,9 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <>
       <AlphabetRain />
-      <div className="flex h-screen overflow-hidden relative z-10">
+      <div className="relative z-10 flex h-dvh flex-col overflow-hidden md:h-screen md:flex-row">
         {showSidebar && <AppSidebar />}
-        <main className="flex-1 overflow-y-auto">
+        <main className="min-h-0 flex-1 overflow-y-auto">
           {children}
         </main>
       </div>

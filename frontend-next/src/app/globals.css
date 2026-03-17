@@ -162,82 +162,82 @@
 /* ─── Light Mode Contrast Fixes ─── */
 /* Override alpha-white backgrounds that are invisible on light bg */
 /* Also add backdrop-blur so text cards get a frosted glass effect over alphabet rain */
-:root main .bg-white\/5 {
+html:not(.dark) main .bg-white\/5 {
   background-color: rgba(255, 249, 240, 0.65) !important;
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
 }
-:root main .bg-white\/8 {
+html:not(.dark) main .bg-white\/8 {
   background-color: rgba(255, 249, 240, 0.7) !important;
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
 }
-:root main .bg-white\/10 {
+html:not(.dark) main .bg-white\/10 {
   background-color: rgba(255, 249, 240, 0.75) !important;
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
 }
-:root main .bg-white\/15 {
+html:not(.dark) main .bg-white\/15 {
   background-color: rgba(255, 249, 240, 0.8) !important;
   backdrop-filter: blur(18px);
   -webkit-backdrop-filter: blur(18px);
 }
-:root main .bg-white\/20 {
+html:not(.dark) main .bg-white\/20 {
   background-color: rgba(255, 249, 240, 0.85) !important;
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
 }
-:root main .border-white\/10 {
+html:not(.dark) main .border-white\/10 {
   border-color: rgba(0, 0, 0, 0.12) !important;
 }
-:root main .border-white\/12 {
+html:not(.dark) main .border-white\/12 {
   border-color: rgba(0, 0, 0, 0.12) !important;
 }
-:root main .border-white\/15 {
+html:not(.dark) main .border-white\/15 {
   border-color: rgba(0, 0, 0, 0.15) !important;
 }
-:root main .border-white\/20 {
+html:not(.dark) main .border-white\/20 {
   border-color: rgba(0, 0, 0, 0.15) !important;
 }
-:root main .border-white\/22 {
+html:not(.dark) main .border-white\/22 {
   border-color: rgba(0, 0, 0, 0.18) !important;
 }
-:root main .border-white\/25 {
+html:not(.dark) main .border-white\/25 {
   border-color: rgba(0, 0, 0, 0.2) !important;
 }
 /* Override white text to dark in light mode */
-:root main .text-white {
+html:not(.dark) main .text-white {
   color: #0F172A !important;
 }
-:root main .text-white\/90 {
+html:not(.dark) main .text-white\/90 {
   color: rgba(15, 23, 42, 0.9) !important;
 }
-:root main .text-white\/80 {
+html:not(.dark) main .text-white\/80 {
   color: rgba(15, 23, 42, 0.8) !important;
 }
-:root main .text-white\/70 {
+html:not(.dark) main .text-white\/70 {
   color: rgba(15, 23, 42, 0.7) !important;
 }
-:root main .text-white\/60 {
+html:not(.dark) main .text-white\/60 {
   color: rgba(15, 23, 42, 0.65) !important;
 }
-:root main .text-white\/50 {
+html:not(.dark) main .text-white\/50 {
   color: rgba(15, 23, 42, 0.55) !important;
 }
-:root main .text-white\/40 {
+html:not(.dark) main .text-white\/40 {
   color: rgba(15, 23, 42, 0.5) !important;
 }
-:root main .text-white\/30 {
+html:not(.dark) main .text-white\/30 {
   color: rgba(15, 23, 42, 0.4) !important;
 }
-:root main .text-white\/20 {
+html:not(.dark) main .text-white\/20 {
   color: rgba(15, 23, 42, 0.3) !important;
 }
-:root main .placeholder-white\/30::placeholder {
+html:not(.dark) main .placeholder-white\/30::placeholder {
   color: rgba(15, 23, 42, 0.35) !important;
 }
 /* Override black/30 header bg in light mode */
-:root main .bg-black\/30 {
+html:not(.dark) main .bg-black\/30 {
   background-color: rgba(255, 249, 240, 0.85) !important;
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
@@ -265,8 +265,8 @@ main [class*="bg-gradient-to"][class*="rounded"] {
   -webkit-backdrop-filter: blur(12px);
 }
 /* Light mode: ensure gradient cards have a warm semi-transparent base */
-:root main [class*="bg-gradient-to"][class*="rounded"][class*="/10"],
-:root main [class*="bg-gradient-to"][class*="rounded"][class*="/20"] {
+html:not(.dark) main [class*="bg-gradient-to"][class*="rounded"][class*="/10"],
+html:not(.dark) main [class*="bg-gradient-to"][class*="rounded"][class*="/20"] {
   background-color: rgba(255, 249, 240, 0.5);
 }
 
@@ -275,8 +275,9 @@ main [class*="bg-gradient-to"][class*="rounded"] {
 .content-blur-card {
   border-radius: 1.25rem;
   position: relative;
+  max-width: 100%;
 }
-:root .content-blur-card {
+html:not(.dark) .content-blur-card {
   background: rgba(255, 249, 240, 0.88);
   backdrop-filter: blur(24px);
   -webkit-backdrop-filter: blur(24px);
@@ -440,6 +441,11 @@ select {
     min-height: 56px;
     min-width: 56px;
   }
+
+  .content-blur-card {
+    margin-left: 0.5rem !important;
+    margin-right: 0.5rem !important;
+  }
 }
 
 /* ─── StarBorder Animations ─── */
@@ -503,7 +509,7 @@ select {
   -webkit-backdrop-filter: blur(30px);
 }
 
-:root .glass {
+html:not(.dark) .glass {
   background: rgba(255, 249, 240, 0.96);
   border: 1px solid rgba(200, 185, 160, 0.5);
 }
@@ -519,9 +525,43 @@ select {
   border-radius: 1rem;
 }
 
-:root .glass-card {
+html:not(.dark) .glass-card {
   background: rgba(255, 253, 247, 0.92);
   border: 1px solid rgba(200, 185, 160, 0.4);
+}
+
+/* Improve readability for muted foreground text on dark translucent cards */
+.dark main .text-foreground\/70 {
+  color: rgba(226, 232, 240, 0.86) !important;
+}
+
+.dark main .text-foreground\/65,
+.dark main .text-foreground\/60 {
+  color: rgba(226, 232, 240, 0.8) !important;
+}
+
+.dark main .text-foreground\/55,
+.dark main .text-foreground\/50 {
+  color: rgba(226, 232, 240, 0.74) !important;
+}
+
+.dark main .text-foreground\/40 {
+  color: rgba(226, 232, 240, 0.62) !important;
+}
+
+.dark main .text-foreground\/30 {
+  color: rgba(226, 232, 240, 0.52) !important;
+}
+
+/* iOS/Android viewport and safe-area fit */
+main {
+  min-height: 0;
+}
+
+@supports (padding: env(safe-area-inset-bottom)) {
+  body {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
 }
 
 .dark .glass-card {

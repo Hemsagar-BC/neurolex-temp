@@ -84,7 +84,18 @@ export default function HandwritingPage() {
                     throw new Error('AI service is busy (rate limit). The backend is retrying automatically — please wait 30-60 seconds and try again.');
                 }
                 const errText = await response.text().catch(() => '');
-                throw new Error(errText || 'Analysis failed. Please try again.');
+                let errorMessage = errText;
+                if (errText) {
+                    try {
+                        const parsed = JSON.parse(errText);
+                        if (typeof parsed?.detail === 'string' && parsed.detail.trim()) {
+                            errorMessage = parsed.detail;
+                        }
+                    } catch {
+                        // Keep original text when response is not JSON.
+                    }
+                }
+                throw new Error(errorMessage || 'Analysis failed. Please try again.');
             }
 
             const data = await response.json();

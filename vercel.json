@@ -1,7 +1,7 @@
 {
-  "version": 2,
-  "framework": "nextjs",
-  "installCommand": "if [ -d frontend-next ]; then cd frontend-next; fi; npm ci",
-  "buildCommand": "if [ -d frontend-next ]; then cd frontend-next; fi; npm run build",
-  "devCommand": "if [ -d frontend-next ]; then cd frontend-next; fi; npm run dev"
+    "version": 2,
+    "framework": "nextjs",
+    "installCommand": "if [ -d frontend-next ]; then cd frontend-next; fi; npm ci",
+    "buildCommand": "if [ -d frontend-next ]; then cd frontend-next; fi; npm run build",
+    "devCommand": "if [ -d frontend-next ]; then cd frontend-next; fi; npm run dev"
 }
