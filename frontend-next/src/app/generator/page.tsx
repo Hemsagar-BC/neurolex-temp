@@ -138,11 +138,22 @@ function GeneratorPageInner() {
             clearTimeout(timeoutId);
 
             if (!response.ok) {
+                let errorDetail = '';
+                try {
+                    const errorPayload = await response.json();
+                    errorDetail = errorPayload?.detail || errorPayload?.message || '';
+                } catch {
+                    errorDetail = '';
+                }
+
                 if (response.status === 429) {
                     throw new Error('AI service is busy (rate limit). Please wait 1–2 minutes and try again.');
                 }
                 if (response.status === 500) {
                     throw new Error('Server processing error. Please try again with shorter text.');
+                }
+                if (errorDetail) {
+                    throw new Error(errorDetail);
                 }
                 throw new Error('Content generation failed. Please try again.');
             }

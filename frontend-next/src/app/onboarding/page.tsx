@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useMemo, useEffect } from "react";
+import { getBackendBaseUrl } from "@/lib/api";
 
 const questions = [
   { id: 1, text: "Do you find it hard to recognize when two words rhyme, like cat and hat?", category: "phonological", hint: "e.g. cat and hat rhyme, dog and log rhyme", categoryLabel: "🔤 Phonological Awareness" },
@@ -181,7 +182,7 @@ export default function Onboarding() {
         gender: "prefer_not_to_say",
         native_english: true,
       };
-      const response = await fetch("http://localhost:8000/assessment/submit", {
+      const response = await fetch(`${getBackendBaseUrl()}/assessment/submit`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),

@@ -24,7 +24,33 @@ def load_model() -> dict:
             f"Model not found at {MODEL_PATH}. Place dyslexai_severity_model.pkl in app/ml/models/"
         )
 
-    pkg = joblib.load(MODEL_PATH)
+    try:
+        raw_pkg = joblib.load(MODEL_PATH)
+    except ModuleNotFoundError as exc:
+        if exc.name == "sklearn":
+            raise RuntimeError(
+                "scikit-learn is required to load the severity model. "
+                "Install requirements and use a supported Python version (e.g., 3.11)."
+            ) from exc
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"Failed to load severity model: {exc}") from exc
+
+    if isinstance(raw_pkg, dict):
+        pkg = raw_pkg
+        model = pkg.get("model") or pkg.get("estimator") or pkg.get("classifier")
+        if model is None:
+            raise RuntimeError("Model package is missing a 'model' entry.")
+        pkg["model"] = model
+    else:
+        pkg = {"model": raw_pkg}
+
+    if "feature_names" not in pkg or not pkg["feature_names"]:
+        model = pkg["model"]
+        inferred = getattr(model, "feature_names_in_", None)
+        if inferred is not None:
+            pkg["feature_names"] = list(inferred)
+
     metrics = pkg.get("metrics", {})
     f1 = metrics.get("f1", 0.0)
     auc = metrics.get("auc", 0.0)
@@ -70,8 +96,9 @@ def build_feature_vector(
     age: int,
     gender: str,
     native_english: bool,
+    feature_names: Optional[List[str]] = None,
 ) -> pd.DataFrame:
-    """Build a 188-feature DataFrame row from raw task results + demographics."""
+    """Build a feature DataFrame row from raw task results + demographics."""
     task_lookup: Dict[int, Dict] = {t["task_number"]: t for t in task_results}
     row: Dict[str, float] = {}
 
@@ -120,13 +147,13 @@ def build_feature_vector(
     row["is_native"] = 1 if native_english else 0
     row["other_lang"] = 0
 
-    # Step G — build DataFrame aligned to model's expected columns
+    # Step G — build DataFrame aligned to model's expected columns (if provided)
     df = pd.DataFrame([row])
-    pkg = load_model()
-    for col in pkg["feature_names"]:
-        if col not in df.columns:
-            df[col] = 0.0
-    df = df[pkg["feature_names"]]
+    if feature_names:
+        for col in feature_names:
+            if col not in df.columns:
+                df[col] = 0.0
+        df = df[feature_names]
     df = df.replace([np.inf, -np.inf], 0).fillna(0)
     return df
 
@@ -139,14 +166,29 @@ def predict_severity(
 ) -> dict:
     """Run the full prediction pipeline and return a structured result dict."""
     pkg = load_model()
-    X_df = build_feature_vector(task_results, age, gender, native_english)
+    feature_names = pkg.get("feature_names")
+    X_df = build_feature_vector(
+        task_results,
+        age,
+        gender,
+        native_english,
+        feature_names=feature_names,
+    )
 
     if pkg.get("needs_scaling") and pkg.get("scaler") is not None:
         X_input = pkg["scaler"].transform(X_df)
     else:
         X_input = X_df.values
 
-    prob = float(pkg["model"].predict_proba(X_input)[0][1])
+    model = pkg["model"]
+    expected_features = getattr(model, "n_features_in_", None)
+    if expected_features is not None and X_input.shape[1] != expected_features:
+        raise RuntimeError(
+            f"Model expects {expected_features} features, got {X_input.shape[1]}. "
+            "Check model feature order or regenerate the serialized model package."
+        )
+
+    prob = float(model.predict_proba(X_input)[0][1])
 
     # Map probability to severity tier
     if prob < 0.30:

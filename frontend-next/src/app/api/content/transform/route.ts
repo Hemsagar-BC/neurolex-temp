@@ -20,7 +20,7 @@ function getUpstreamApiBase() {
     process.env.NEXT_PUBLIC_BACKEND_URL;
 
   const usingFallback = !configuredFromEnv?.trim();
-  const configured = configuredFromEnv?.trim() || "http://localhost:8000/api";
+  const configured = configuredFromEnv?.trim() || "http://localhost:8001/api";
   const normalized = normalizeHttpUrl(configured);
   const apiBase = /\/api$/i.test(normalized) ? normalized : `${normalized}/api`;
 

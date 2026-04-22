@@ -41,10 +41,12 @@ from app.routers import games as games_router
 from app.routers import tts as tts_router
 from app.services.severity_model import load_model as load_severity_model
 
-# Global rate limiter for Gemini API (free tier: ~15 RPM for 2.0-flash)
+# Global rate limiter for Gemini API (free tier: ~15 RPM for 2.0-flash, ~1 RPM for Vision)
 _gemini_lock = threading.Lock()
 _last_gemini_call = 0
-MIN_CALL_INTERVAL = 1  # 1s stagger for parallel calls — retry handles 429s
+_last_vision_call = 0
+MIN_CALL_INTERVAL = 1  # 1s stagger for text API
+MIN_VISION_INTERVAL = 3  # 3s minimum for Vision API (free tier is very limited)
 
 # Load environment variables
 load_dotenv()
@@ -131,6 +133,27 @@ except Exception as firebase_err:
 app.include_router(assessment_router.router)
 app.include_router(games_router.router)
 app.include_router(tts_router.router)
+
+
+@app.get("/health/model")
+def health_model():
+    """Health check for the dyslexia severity model."""
+    try:
+        pkg = load_severity_model()
+        model = pkg.get("model") if isinstance(pkg, dict) else None
+        model_name = type(model).__name__ if model is not None else "unknown"
+        feature_count = None
+        if isinstance(pkg, dict):
+            feature_names = pkg.get("feature_names")
+            if feature_names:
+                feature_count = len(feature_names)
+            elif model is not None and hasattr(model, "n_features_in_"):
+                feature_count = int(getattr(model, "n_features_in_"))
+        return {"status": "ok", "model": model_name, "feature_count": feature_count}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Model load failed: {exc}")
 
 # Preload ML severity model at startup
 try:
@@ -225,9 +248,21 @@ def _throttle_gemini():
         elapsed = now - _last_gemini_call
         if elapsed < MIN_CALL_INTERVAL:
             wait = MIN_CALL_INTERVAL - elapsed
-            print(f"[WAIT] Throttling Gemini call, waiting {wait:.1f}s...")
+            print(f"[WAIT] Throttling Gemini text call, waiting {wait:.1f}s...")
             time.sleep(wait)
         _last_gemini_call = time.time()
+
+def _throttle_vision():
+    """Stricter throttling for Vision API (free tier is very rate-limited)."""
+    global _last_vision_call
+    with _gemini_lock:
+        now = time.time()
+        elapsed = now - _last_vision_call
+        if elapsed < MIN_VISION_INTERVAL:
+            wait = MIN_VISION_INTERVAL - elapsed
+            print(f"[WAIT] Throttling Vision API call, waiting {wait:.1f}s...")
+            time.sleep(wait)
+        _last_vision_call = time.time()
 
 
 def generate_with_gemini(prompt: str, system: str = None, stream: bool = False) -> str:
@@ -618,56 +653,93 @@ class RecommendationRequest(BaseModel):
 @app.post("/api/handwriting/analyze")
 async def analyze_handwriting(file: UploadFile = File(...), userId: str = "anonymous"):
     """
-    Analyze handwriting image for dyslexia-related errors using Gemini Vision AI.
+    Analyze handwriting image for dyslexia-related errors using OCR + Gemini Text API.
     Returns detailed scoring, extracted text, error highlights, and improvement tips.
+    Uses OCR for text extraction (reliable) + Text API for analysis (better rate limits).
     """
     try:
+        import easyocr
+
         file_content = await file.read()
-        
+
         # Validate file size (50 MB limit)
         if len(file_content) > 50 * 1024 * 1024:
             raise HTTPException(status_code=400, detail="File size exceeds 50 MB limit.")
         
-        # Enhance image for better OCR/analysis
+        # ── Enhance image for better OCR ──────────────────────────────────
         try:
             if Image is None:
                 raise ImportError("Pillow not installed")
             img = Image.open(BytesIO(file_content))
-            # Convert to RGB if needed (handles RGBA, grayscale, etc.)
             if img.mode != 'RGB':
                 img = img.convert('RGB')
-            # Increase contrast
             img = ImageEnhance.Contrast(img).enhance(1.5)
-            # Increase sharpness
             img = ImageEnhance.Sharpness(img).enhance(2.0)
-            # Slight brightness boost
             img = ImageEnhance.Brightness(img).enhance(1.1)
-            # Save enhanced image to buffer
-            buf = BytesIO()
-            img.save(buf, format='JPEG', quality=95)
-            enhanced_bytes = buf.getvalue()
-            base64_image = base64.b64encode(enhanced_bytes).decode('utf-8')
-            mime_type = 'image/jpeg'
-            print(f"[IMG] Image enhanced: {img.size[0]}x{img.size[1]}, {len(enhanced_bytes)} bytes")
-        except Exception as img_err:
-            print(f"[WARN] Image enhancement failed ({img_err}), using original")
-            base64_image = base64.b64encode(file_content).decode('utf-8')
-            mime_type = file.content_type or 'image/jpeg'
+
+            # Save enhanced image to temp file for OCR
+            import tempfile
+            import os as os_module
+            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+                img.save(tmp, format='JPEG', quality=95)
+                tmp_path = tmp.name
+
+            print(f"[IMG] Image enhanced: {img.size[0]}x{img.size[1]}")
+
+            # ── Extract text using OCR ───────────────────────────────────
+            print("[OCR] Starting text extraction with EasyOCR...")
+            loop = asyncio.get_event_loop()
+
+            # Run OCR in executor to avoid blocking
+            def run_ocr():
+                reader = easyocr.Reader(['en'], gpu=False)
+                results = reader.readtext(tmp_path)
+                # Extract text and confidence
+                extracted_lines = []
+                for detection in results:
+                    text = detection[1]
+                    confidence = detection[2]
+                    extracted_lines.append({"text": text, "confidence": confidence})
+                return extracted_lines
+
+            extracted_lines = await loop.run_in_executor(None, run_ocr)
+
+            # Join extracted text
+            full_extracted_text = " ".join([line["text"] for line in extracted_lines])
+            avg_confidence = sum(line["confidence"] for line in extracted_lines) / len(extracted_lines) if extracted_lines else 0
+
+            print(f"[OCR] Extracted {len(full_extracted_text)} chars, confidence: {avg_confidence:.2f}")
+            print(f"[OCR] Text: {full_extracted_text[:200]}...")
+
+            # Clean up temp file
+            try:
+                os_module.unlink(tmp_path)
+            except:
+                pass
+
+        except ImportError:
+            raise HTTPException(status_code=500, detail="EasyOCR not installed. Run: pip install easyocr")
+        except Exception as ocr_err:
+            print(f"[ERROR] OCR extraction failed: {ocr_err}")
+            raise HTTPException(status_code=500, detail=f"Text extraction failed: {str(ocr_err)}")
         
-        url = f"{GEMINI_API_BASE}/{GEMINI_VISION_MODEL}:generateContent?key={_get_gemini_key()}"
-        headers = {"Content-Type": "application/json"}
-        
-        system_prompt = """You are a dyslexia handwriting analyst. Analyze the handwriting image and respond with ONLY a JSON object (no markdown, no code fences, no extra text).
+        # ── Prepare Text API analysis with extracted text ──────────────────
+        print("[TEXT_API] Preparing handwriting analysis with Gemini Text API...")
+
+        # Build analysis metadata from OCR results
+        text_quality = "high" if avg_confidence > 0.8 else "medium" if avg_confidence > 0.6 else "low"
+
+        system_prompt = """You are a dyslexia handwriting analyst. Analyze the extracted handwriting text and respond with ONLY a JSON object (no markdown, no code fences, no extra text).
 
 Instructions:
-1. Extract all text from the image as "extractedText" (keep it concise — max 300 chars, truncate with ... if longer)
+1. Extract all text from the provided text as "extractedText" (keep it concise — max 300 chars, truncate with ... if longer)
 2. Score each category 0-100 independently (vary scores based on actual quality):
-   - letterFormation: letter shapes, b/d p/q reversals
-   - spacing: letter/word/line spacing consistency
-   - alignment: baseline, slant uniformity
-   - spelling: correct spelling (flag every error)
-   - sizing: letter size consistency
-   - legibility: overall readability
+   - letterFormation: letter shapes, b/d p/q reversals (infer from spelling/text patterns)
+   - spacing: letter/word/line spacing consistency (infer from OCR quality)
+   - alignment: baseline, slant uniformity (infer from OCR confidence and layout)
+   - spelling: correct spelling (flag every error found in text)
+   - sizing: letter size consistency (infer from OCR detections)
+   - legibility: overall readability (use OCR confidence as proxy)
 3. Overall score = weighted avg: letterFormation 25%, spacing 15%, alignment 15%, spelling 25%, sizing 10%, legibility 10%
 4. List errors (max 8 most important) and spelling errors (max 10)
 5. Keep all descriptions SHORT (under 50 chars each)
@@ -675,20 +747,26 @@ Instructions:
 JSON format — output ONLY this, nothing else:
 {"score":N,"extractedText":"...","summary":"...","categoryScores":{"letterFormation":N,"spacing":N,"alignment":N,"spelling":N,"sizing":N,"legibility":N},"errors":[{"type":"...","severity":"high|medium|low","word":"...","correction":"...","description":"...","suggestion":"..."}],"spellingErrors":[{"wrong":"...","correct":"...","type":"misspelling|abbreviation|missing_letter|extra_letter|transposition"}],"strengths":["..."],"recommendations":[{"title":"...","description":"...","priority":"high|medium|low"}]}"""
 
-        user_prompt = """Analyze this handwriting. Extract text, score each category independently (NOT same scores), find errors. Keep descriptions SHORT. Output ONLY valid JSON, no markdown fences."""
+        user_prompt = f"""Analyze this handwriting text extracted by OCR:
+
+EXTRACTED TEXT:
+"{full_extracted_text}"
+
+OCR QUALITY METRICS:
+- Text Quality: {text_quality}
+- OCR Confidence: {avg_confidence:.2f}/1.0
+- Detected Text Regions: {len(extracted_lines)}
+
+Score each category independently (NOT all same scores). Find and flag spelling errors. Keep descriptions SHORT. Output ONLY valid JSON, no markdown fences."""
+
+        headers = {"Content-Type": "application/json"}
 
         payload = {
             "contents": [
                 {
                     "role": "user",
                     "parts": [
-                        {"text": f"{system_prompt}\n\n{user_prompt}"},
-                        {
-                            "inlineData": {
-                                "mimeType": mime_type,
-                                "data": base64_image
-                            }
-                        }
+                        {"text": f"{system_prompt}\n\n{user_prompt}"}
                     ]
                 }
             ],
@@ -698,48 +776,50 @@ JSON format — output ONLY this, nothing else:
                 "responseMimeType": "application/json"
             }
         }
-        
-        # Retry with backoff for rate limits (free tier needs longer waits)
+
+        # Retry with exponential backoff for rate limits
         result_text = None
-        max_retries = 5
+        max_retries = 5  # Fewer retries needed for text API (more stable)
         for attempt in range(max_retries):
-            _throttle_gemini()
+            _throttle_gemini()  # Use standard text API throttle (1-second minimum)
             # Rebuild URL each attempt (key may have rotated)
-            attempt_url = f"{GEMINI_API_BASE}/{GEMINI_VISION_MODEL}:generateContent?key={_get_gemini_key()}"
+            attempt_url = f"{GEMINI_API_BASE}/{GEMINI_MODEL}:generateContent?key={_get_gemini_key()}"
             try:
                 loop = asyncio.get_event_loop()
                 response = await loop.run_in_executor(
-                    None, lambda: requests.post(attempt_url, headers=headers, json=payload, timeout=120)
+                    None, lambda: requests.post(attempt_url, headers=headers, json=payload, timeout=30)
                 )
             except requests.exceptions.RequestException as req_err:
-                print(f"[WARN] Request failed (attempt {attempt+1}): {req_err}")
+                print(f"[WARN] Text API request failed (attempt {attempt+1}): {req_err}")
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(10)
+                    await asyncio.sleep(2)
                     continue
                 raise HTTPException(status_code=500, detail=f"Network error: {str(req_err)}")
-            
+
             if response.status_code == 429:
-                # Rotate to next API key if available
+                # Rate limit — rotate key and wait
                 _rotate_gemini_key()
-                # Parse Retry-After header if available, otherwise use exponential backoff
-                retry_after = response.headers.get('Retry-After')
-                if retry_after:
-                    wait_time = min(int(retry_after), 90)
-                else:
-                    wait_time = min((2 ** attempt) * 10, 90)  # 10s, 20s, 40s, 80s, 90s
-                print(f"[RATE] Vision rate limited (attempt {attempt+1}/{max_retries}), waiting {wait_time}s...")
+                wait_time = min((2 ** attempt) * 2, 10)  # Shorter backoff for text API
+                print(f"[RATE] Text API rate limited (attempt {attempt+1}/{max_retries}), waiting {wait_time}s...")
                 await asyncio.sleep(wait_time)
                 continue
-            
+
+            if response.status_code == 503:
+                # Service unavailable — retry
+                wait_time = min((2 ** attempt) * 3, 15)
+                print(f"[UNAVAIL] Gemini Text API unavailable (attempt {attempt+1}/{max_retries}), waiting {wait_time}s...")
+                await asyncio.sleep(wait_time)
+                continue
+
             if response.status_code != 200:
-                print(f"Gemini Vision API Error: {response.status_code} - {response.text}")
-                raise HTTPException(status_code=500, detail=f"Vision API error: {response.text}")
-            
+                print(f"[ERROR] Gemini Text API Error: {response.status_code} - {response.text}")
+                raise HTTPException(status_code=500, detail=f"Analysis failed: {response.text[:200]}")
+
             result_text = response.json()['candidates'][0]['content']['parts'][0]['text']
             break
-        
+
         if result_text is None:
-            raise HTTPException(status_code=429, detail="Rate limit exceeded. Please wait 1-2 minutes and try again.")
+            raise HTTPException(status_code=503, detail="Gemini Text API unavailable. Please try again in a moment.")
         
         # Parse the JSON response
         try:
