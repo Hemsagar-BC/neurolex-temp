@@ -326,6 +326,173 @@ def fallback_summary(transcription: str) -> str:
     return f"{sentences[0]} {sentences[1]}"[:320]
 
 
+def _clamp_score(value: float) -> int:
+    return max(0, min(100, int(round(value))))
+
+
+def _extract_spelling_hints(text: str, max_items: int = 10) -> list:
+    hints = []
+    seen = set()
+    for token in (text or "").split():
+        wrong = token.strip()
+        cleaned = re.sub(r"[^A-Za-z']", "", wrong)
+        if not wrong or not cleaned:
+            continue
+        if cleaned.lower() == wrong.lower():
+            continue
+        dedupe_key = wrong.lower()
+        if dedupe_key in seen:
+            continue
+
+        seen.add(dedupe_key)
+        if re.search(r"(.)\1{2,}", cleaned, flags=re.IGNORECASE):
+            hint_type = "extra_letter"
+        elif "_" in wrong or "-" in wrong:
+            hint_type = "missing_letter"
+        else:
+            hint_type = "misspelling"
+
+        hints.append({
+            "wrong": wrong[:40],
+            "correct": cleaned[:40],
+            "type": hint_type,
+        })
+        if len(hints) >= max_items:
+            break
+
+    return hints
+
+
+def build_handwriting_fallback_result(extracted_text: str, avg_confidence: float, extracted_lines: list, reason: str = "") -> dict:
+    """Build a deterministic OCR-only analysis payload when Gemini is unavailable."""
+    normalized_text = _normalize_text(extracted_text)
+    if not normalized_text:
+        normalized_text = "No readable text could be extracted from the image."
+
+    tokens = normalized_text.split()
+    token_count = len(tokens)
+    noisy_tokens = sum(1 for t in tokens if re.search(r"[^A-Za-z']", t))
+    noise_ratio = (noisy_tokens / token_count) if token_count else 0.0
+    confidence = max(0.0, min(1.0, float(avg_confidence or 0.0)))
+
+    category_scores = {
+        "letterFormation": _clamp_score(35 + (confidence * 50) - (noise_ratio * 20)),
+        "spacing": _clamp_score(38 + (confidence * 48) - (noise_ratio * 10)),
+        "alignment": _clamp_score(36 + (confidence * 46) - (noise_ratio * 8)),
+        "spelling": _clamp_score(78 - ((1 - confidence) * 30) - (noise_ratio * 45)),
+        "sizing": _clamp_score(40 + (confidence * 44) - (noise_ratio * 6)),
+        "legibility": _clamp_score(30 + (confidence * 60) - (noise_ratio * 12)),
+    }
+
+    weights = {
+        "letterFormation": 0.25,
+        "spacing": 0.15,
+        "alignment": 0.15,
+        "spelling": 0.25,
+        "sizing": 0.10,
+        "legibility": 0.10,
+    }
+    score = _clamp_score(sum(category_scores[k] * w for k, w in weights.items()))
+
+    spelling_hints = _extract_spelling_hints(extracted_text)
+    errors = []
+
+    if confidence < 0.55:
+        errors.append({
+            "type": "Low OCR confidence",
+            "severity": "medium",
+            "word": "",
+            "correction": "",
+            "description": f"OCR confidence is {confidence:.2f}, so analysis may miss details.",
+            "suggestion": "Retake the photo with better lighting and keep the page flat.",
+        })
+
+    if noise_ratio > 0.25:
+        errors.append({
+            "type": "Irregular character patterns",
+            "severity": "medium",
+            "word": "",
+            "correction": "",
+            "description": "Detected many symbols/merged words in extracted text.",
+            "suggestion": "Increase spacing between words and letters while writing.",
+        })
+
+    for item in spelling_hints[:3]:
+        errors.append({
+            "type": "Spelling pattern",
+            "severity": "low",
+            "word": item["wrong"],
+            "correction": item["correct"],
+            "description": "Possible spelling or character-order issue from OCR text.",
+            "suggestion": "Practice slow copy-writing and verify each word after writing.",
+        })
+
+    if not errors:
+        errors.append({
+            "type": "Minor consistency checks",
+            "severity": "low",
+            "word": "",
+            "correction": "",
+            "description": "No major issues detected in fallback analysis.",
+            "suggestion": "Keep practicing uniform letter size and spacing.",
+        })
+
+    strengths = []
+    if category_scores["legibility"] >= 65:
+        strengths.append("Overall readability is reasonably clear.")
+    if category_scores["spacing"] >= 60:
+        strengths.append("Word spacing is mostly consistent.")
+    if category_scores["spelling"] >= 60:
+        strengths.append("Most words appear close to correct form.")
+    if not strengths:
+        strengths.append("You provided enough text for baseline handwriting feedback.")
+
+    recommendations = []
+    if category_scores["letterFormation"] < 60:
+        recommendations.append({
+            "title": "Letter formation drills",
+            "description": "Practice b/d and p/q pairs using tracing sheets for 10 minutes daily.",
+            "priority": "high",
+        })
+    if category_scores["spacing"] < 60 or category_scores["alignment"] < 60:
+        recommendations.append({
+            "title": "Spacing and baseline control",
+            "description": "Write on ruled paper and leave one finger-space between words.",
+            "priority": "medium",
+        })
+    if category_scores["spelling"] < 60:
+        recommendations.append({
+            "title": "Word-building practice",
+            "description": "Break words into syllables and read aloud before writing.",
+            "priority": "medium",
+        })
+    if not recommendations:
+        recommendations.append({
+            "title": "Maintain current progress",
+            "description": "Continue short daily writing practice to improve consistency.",
+            "priority": "low",
+        })
+
+    short_reason = _normalize_text(reason)[:180]
+    summary = f"Fallback OCR-based analysis completed. Confidence {confidence:.2f}."
+    if short_reason:
+        summary = f"{summary} AI service note: {short_reason}"
+
+    return {
+        "score": score,
+        "extractedText": normalized_text[:700],
+        "summary": summary,
+        "categoryScores": category_scores,
+        "errors": errors[:8],
+        "spellingErrors": spelling_hints,
+        "strengths": strengths,
+        "recommendations": recommendations,
+        "analysisSource": "ocr-fallback",
+        "ocrConfidence": round(confidence, 2),
+        "detectedTextRegions": len(extracted_lines or []),
+    }
+
+
 def safe_generate_with_fallback(prompt: str, system: str, fallback_value: str, label: str, errors: list) -> str:
     """Try Gemini generation and fall back to deterministic output when unavailable."""
     try:
@@ -930,170 +1097,207 @@ Score each category independently (NOT all same scores). Find and flag spelling 
             }
         }
 
-        # Retry with exponential backoff for rate limits
+        # Retry with exponential backoff for rate limits. If AI is down, return OCR fallback.
         result_text = None
-        max_retries = 5  # Fewer retries needed for text API (more stable)
-        for attempt in range(max_retries):
-            _throttle_gemini()  # Use standard text API throttle (1-second minimum)
-            # Rebuild URL each attempt (key may have rotated)
-            attempt_url = f"{GEMINI_API_BASE}/{GEMINI_MODEL}:generateContent?key={_get_gemini_key()}"
-            try:
-                loop = asyncio.get_event_loop()
-                response = await loop.run_in_executor(
-                    None, lambda: requests.post(attempt_url, headers=headers, json=payload, timeout=30)
-                )
-            except requests.exceptions.RequestException as req_err:
-                print(f"[WARN] Text API request failed (attempt {attempt+1}): {req_err}")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(2)
+        fallback_reason = ""
+        max_retries = 3
+
+        if not _all_gemini_keys:
+            fallback_reason = "No Gemini API key configured on backend."
+            print("[FALLBACK] No Gemini API key configured. Using OCR-only analysis.")
+        else:
+            for attempt in range(max_retries):
+                _throttle_gemini()
+
+                try:
+                    attempt_url = f"{GEMINI_API_BASE}/{GEMINI_MODEL}:generateContent?key={_get_gemini_key()}"
+                except RuntimeError as key_err:
+                    fallback_reason = str(key_err)
+                    print(f"[FALLBACK] {fallback_reason}")
+                    break
+
+                try:
+                    loop = asyncio.get_event_loop()
+                    response = await loop.run_in_executor(
+                        None, lambda: requests.post(attempt_url, headers=headers, json=payload, timeout=30)
+                    )
+                except requests.exceptions.RequestException as req_err:
+                    fallback_reason = f"Network error while calling Gemini: {req_err}"
+                    print(f"[WARN] Text API request failed (attempt {attempt+1}/{max_retries}): {req_err}")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(2)
+                        continue
+                    break
+
+                if response.status_code == 429:
+                    _rotate_gemini_key()
+                    wait_time = min((2 ** attempt) * 2, 10)
+                    fallback_reason = "Gemini rate limited all retry attempts."
+                    print(f"[RATE] Text API rate limited (attempt {attempt+1}/{max_retries}), waiting {wait_time}s...")
+                    await asyncio.sleep(wait_time)
                     continue
-                raise HTTPException(status_code=500, detail=f"Network error: {str(req_err)}")
 
-            if response.status_code == 429:
-                # Rate limit — rotate key and wait
-                _rotate_gemini_key()
-                wait_time = min((2 ** attempt) * 2, 10)  # Shorter backoff for text API
-                print(f"[RATE] Text API rate limited (attempt {attempt+1}/{max_retries}), waiting {wait_time}s...")
-                await asyncio.sleep(wait_time)
-                continue
+                if response.status_code == 503:
+                    wait_time = min((2 ** attempt) * 2, 6)
+                    fallback_reason = "Gemini service unavailable after retries."
+                    print(f"[UNAVAIL] Gemini Text API unavailable (attempt {attempt+1}/{max_retries}), waiting {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                    continue
 
-            if response.status_code == 503:
-                # Service unavailable — retry
-                wait_time = min((2 ** attempt) * 3, 15)
-                print(f"[UNAVAIL] Gemini Text API unavailable (attempt {attempt+1}/{max_retries}), waiting {wait_time}s...")
-                await asyncio.sleep(wait_time)
-                continue
+                if response.status_code >= 500:
+                    fallback_reason = f"Gemini server error {response.status_code}."
+                    wait_time = min((2 ** attempt), 6)
+                    print(f"[WARN] Gemini server error {response.status_code} (attempt {attempt+1}/{max_retries})")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(wait_time)
+                        continue
+                    break
 
-            if response.status_code != 200:
-                print(f"[ERROR] Gemini Text API Error: {response.status_code} - {response.text}")
-                raise HTTPException(status_code=500, detail=f"Analysis failed: {response.text[:200]}")
+                if response.status_code != 200:
+                    fallback_reason = f"Gemini request rejected ({response.status_code})."
+                    print(f"[ERROR] Gemini Text API Error: {response.status_code} - {response.text[:240]}")
+                    break
 
-            result_text = response.json()['candidates'][0]['content']['parts'][0]['text']
-            break
+                try:
+                    response_json = response.json()
+                    result_text = response_json["candidates"][0]["content"]["parts"][0]["text"]
+                    break
+                except Exception as shape_err:
+                    fallback_reason = f"Gemini response format was unexpected: {shape_err}"
+                    print(f"[WARN] Unexpected Gemini response shape (attempt {attempt+1}/{max_retries}): {shape_err}")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(1)
+                        continue
+                    break
 
         if result_text is None:
-            raise HTTPException(status_code=503, detail="Gemini Text API unavailable. Please try again in a moment.")
-        
-        # Parse the JSON response
-        try:
-            # Strip markdown code fences if present (```json ... ``` or ``` ... ```)
-            cleaned = result_text.strip()
-            if cleaned.startswith("```"):
-                # Remove opening fence (```json or ```)
-                first_newline = cleaned.index('\n')
-                cleaned = cleaned[first_newline + 1:]
-            if cleaned.endswith("```"):
-                cleaned = cleaned[:-3]
-            cleaned = cleaned.strip()
-            
-            # Try to extract JSON from the cleaned response
-            json_start = cleaned.find('{')
-            json_end = cleaned.rfind('}') + 1
-            if json_start >= 0 and json_end > json_start:
-                json_str = cleaned[json_start:json_end]
-            else:
-                json_str = cleaned
-            
-            print(f"[PARSE] Parsing JSON response ({len(json_str)} chars)...")
-            result = json.loads(json_str)
-            print(f"[OK] Parsed successfully. Score from AI: {result.get('score', 'N/A')}")
-            
-            # Use AI's category scores directly — do NOT override with defaults
-            if "categoryScores" in result and isinstance(result["categoryScores"], dict):
-                cats = result["categoryScores"]
-                # Recompute the overall score from category scores for consistency
-                weights = {
-                    "letterFormation": 0.25, "spacing": 0.15, "alignment": 0.15,
-                    "spelling": 0.25, "sizing": 0.10, "legibility": 0.10
-                }
-                computed_score = sum(cats.get(k, cats.get(k, 50)) * w for k, w in weights.items())
-                result["score"] = round(computed_score)
-                print(f"[SCORE] Category scores: {cats}")
-                print(f"[SCORE] Computed weighted score: {result['score']}")
-            
-            # Only fill truly missing fields — do NOT overwrite AI-provided values
-            result.setdefault("extractedText", "")
-            result.setdefault("summary", "Analysis complete.")
-            if "categoryScores" not in result:
-                # Only use defaults if AI completely failed to provide category scores
-                result["categoryScores"] = {
-                    "letterFormation": result.get("score", 50),
-                    "spacing": result.get("score", 50),
-                    "alignment": result.get("score", 50),
-                    "spelling": result.get("score", 50),
-                    "sizing": result.get("score", 50),
-                    "legibility": result.get("score", 50),
-                }
-            result.setdefault("errors", [])
-            result.setdefault("spellingErrors", [])
-            result.setdefault("strengths", [])
-            result.setdefault("recommendations", [])
-            
-        except (json.JSONDecodeError, ValueError) as parse_err:
-            print(f"[ERROR] JSON parse failed: {parse_err}")
-            print(f"[ERROR] Raw response (first 500 chars): {result_text[:500]}")
-            
-            # Try to repair truncated JSON
+            result = build_handwriting_fallback_result(
+                full_extracted_text,
+                avg_confidence,
+                extracted_lines,
+                fallback_reason or "Gemini Text API unavailable.",
+            )
+        else:
+            # Parse the JSON response
             try:
-                import re as regex_module
-                
-                # Strategy 1: Find the JSON and try to repair truncation
-                json_match = regex_module.search(r'\{[\s\S]*', result_text)
-                if json_match:
-                    truncated = json_match.group()
-                    # Remove control characters
-                    truncated = regex_module.sub(r'[\x00-\x1f\x7f-\x9f]', ' ', truncated)
-                    
-                    # Try to repair: close any unclosed strings and brackets
-                    repaired = truncated.rstrip()
-                    # If it ends mid-string, close the string
-                    if repaired.count('"') % 2 != 0:
-                        repaired += '"'
-                    # Count open/close brackets and close any unclosed ones
-                    open_brackets = repaired.count('{') - repaired.count('}')
-                    open_arrays = repaired.count('[') - repaired.count(']')
-                    # Close arrays first, then objects
-                    repaired += ']' * max(0, open_arrays)
-                    repaired += '}' * max(0, open_brackets)
-                    
-                    result = json.loads(repaired)
-                    print(f"[OK] Recovered truncated JSON. Score: {result.get('score', 'N/A')}")
-                    result.setdefault("extractedText", "")
-                    result.setdefault("summary", "Analysis complete (response was truncated).")
-                    result.setdefault("categoryScores", {})
-                    result.setdefault("errors", [])
-                    result.setdefault("spellingErrors", [])
-                    result.setdefault("strengths", [])
-                    result.setdefault("recommendations", [])
+                # Strip markdown code fences if present (```json ... ``` or ``` ... ```)
+                cleaned = result_text.strip()
+                if cleaned.startswith("```"):
+                    # Remove opening fence (```json or ```)
+                    first_newline = cleaned.index('\n')
+                    cleaned = cleaned[first_newline + 1:]
+                if cleaned.endswith("```"):
+                    cleaned = cleaned[:-3]
+                cleaned = cleaned.strip()
+
+                # Try to extract JSON from the cleaned response
+                json_start = cleaned.find('{')
+                json_end = cleaned.rfind('}') + 1
+                if json_start >= 0 and json_end > json_start:
+                    json_str = cleaned[json_start:json_end]
                 else:
-                    raise ValueError("No JSON object found in response")
-            except Exception as repair_err:
-                print(f"[ERROR] JSON repair also failed: {repair_err}")
-                # Extract what we can using regex
-                score_match = re.search(r'"score"\s*:\s*(\d+)', result_text)
-                text_match = re.search(r'"extractedText"\s*:\s*"([^"]*)', result_text)
-                score_val = int(score_match.group(1)) if score_match else 50
-                text_val = text_match.group(1) if text_match else ""
-                
-                # Try to extract category scores individually
-                cats = {}
-                for cat in ["letterFormation", "spacing", "alignment", "spelling", "sizing", "legibility"]:
-                    cat_match = re.search(rf'"{cat}"\s*:\s*(\d+)', result_text)
-                    cats[cat] = int(cat_match.group(1)) if cat_match else score_val
-                
-                result = {
-                    "score": score_val,
-                    "extractedText": text_val,
-                    "summary": "Analysis partially recovered from AI response.",
-                    "categoryScores": cats,
-                    "errors": [],
-                    "spellingErrors": [],
-                    "strengths": [],
-                    "recommendations": [
-                        {"title": "Try again", "description": "Upload a clearer photo with good lighting for more detailed analysis.", "priority": "medium"}
-                    ]
-                }
-                print(f"[WARN] Regex fallback used. Score: {score_val}, Categories: {cats}")
+                    json_str = cleaned
+
+                print(f"[PARSE] Parsing JSON response ({len(json_str)} chars)...")
+                result = json.loads(json_str)
+                print(f"[OK] Parsed successfully. Score from AI: {result.get('score', 'N/A')}")
+
+                # Use AI's category scores directly — do NOT override with defaults
+                if "categoryScores" in result and isinstance(result["categoryScores"], dict):
+                    cats = result["categoryScores"]
+                    # Recompute the overall score from category scores for consistency
+                    weights = {
+                        "letterFormation": 0.25, "spacing": 0.15, "alignment": 0.15,
+                        "spelling": 0.25, "sizing": 0.10, "legibility": 0.10
+                    }
+                    computed_score = sum(cats.get(k, cats.get(k, 50)) * w for k, w in weights.items())
+                    result["score"] = round(computed_score)
+                    print(f"[SCORE] Category scores: {cats}")
+                    print(f"[SCORE] Computed weighted score: {result['score']}")
+
+                # Only fill truly missing fields — do NOT overwrite AI-provided values
+                result.setdefault("extractedText", "")
+                result.setdefault("summary", "Analysis complete.")
+                if "categoryScores" not in result:
+                    # Only use defaults if AI completely failed to provide category scores
+                    result["categoryScores"] = {
+                        "letterFormation": result.get("score", 50),
+                        "spacing": result.get("score", 50),
+                        "alignment": result.get("score", 50),
+                        "spelling": result.get("score", 50),
+                        "sizing": result.get("score", 50),
+                        "legibility": result.get("score", 50),
+                    }
+                result.setdefault("errors", [])
+                result.setdefault("spellingErrors", [])
+                result.setdefault("strengths", [])
+                result.setdefault("recommendations", [])
+
+            except (json.JSONDecodeError, ValueError) as parse_err:
+                print(f"[ERROR] JSON parse failed: {parse_err}")
+                print(f"[ERROR] Raw response (first 500 chars): {result_text[:500]}")
+
+                # Try to repair truncated JSON
+                try:
+                    import re as regex_module
+
+                    # Strategy 1: Find the JSON and try to repair truncation
+                    json_match = regex_module.search(r'\{[\s\S]*', result_text)
+                    if json_match:
+                        truncated = json_match.group()
+                        # Remove control characters
+                        truncated = regex_module.sub(r'[\x00-\x1f\x7f-\x9f]', ' ', truncated)
+
+                        # Try to repair: close any unclosed strings and brackets
+                        repaired = truncated.rstrip()
+                        # If it ends mid-string, close the string
+                        if repaired.count('"') % 2 != 0:
+                            repaired += '"'
+                        # Count open/close brackets and close any unclosed ones
+                        open_brackets = repaired.count('{') - repaired.count('}')
+                        open_arrays = repaired.count('[') - repaired.count(']')
+                        # Close arrays first, then objects
+                        repaired += ']' * max(0, open_arrays)
+                        repaired += '}' * max(0, open_brackets)
+
+                        result = json.loads(repaired)
+                        print(f"[OK] Recovered truncated JSON. Score: {result.get('score', 'N/A')}")
+                        result.setdefault("extractedText", "")
+                        result.setdefault("summary", "Analysis complete (response was truncated).")
+                        result.setdefault("categoryScores", {})
+                        result.setdefault("errors", [])
+                        result.setdefault("spellingErrors", [])
+                        result.setdefault("strengths", [])
+                        result.setdefault("recommendations", [])
+                    else:
+                        raise ValueError("No JSON object found in response")
+                except Exception as repair_err:
+                    print(f"[ERROR] JSON repair also failed: {repair_err}")
+                    # Extract what we can using regex
+                    score_match = re.search(r'"score"\s*:\s*(\d+)', result_text)
+                    text_match = re.search(r'"extractedText"\s*:\s*"([^"]*)', result_text)
+                    score_val = int(score_match.group(1)) if score_match else 50
+                    text_val = text_match.group(1) if text_match else ""
+
+                    # Try to extract category scores individually
+                    cats = {}
+                    for cat in ["letterFormation", "spacing", "alignment", "spelling", "sizing", "legibility"]:
+                        cat_match = re.search(rf'"{cat}"\s*:\s*(\d+)', result_text)
+                        cats[cat] = int(cat_match.group(1)) if cat_match else score_val
+
+                    result = {
+                        "score": score_val,
+                        "extractedText": text_val,
+                        "summary": "Analysis partially recovered from AI response.",
+                        "categoryScores": cats,
+                        "errors": [],
+                        "spellingErrors": [],
+                        "strengths": [],
+                        "recommendations": [
+                            {"title": "Try again", "description": "Upload a clearer photo with good lighting for more detailed analysis.", "priority": "medium"}
+                        ]
+                    }
+                    print(f"[WARN] Regex fallback used. Score: {score_val}, Categories: {cats}")
         
         # Save to Firestore
         try:
