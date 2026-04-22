@@ -1,7 +1,8 @@
 ﻿"use client";
 
-import { useRef } from "react";
+import { useRef, useEffect, Suspense } from "react";
 import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   Mic,
   Brain,
@@ -17,6 +18,7 @@ import {
 import Footer from "@/components/layout/Footer";
 import { useAuth } from "@/context/AuthContext";
 import { motion, useInView } from "framer-motion";
+import { useAuthStore } from "@/stores/authStore";
 
 const features = [
   {
@@ -91,10 +93,62 @@ const fadeUp = {
   }),
 };
 
+const ctaBaseClass =
+  "inline-flex h-14 min-w-52 items-center justify-center gap-2 rounded-full px-8 text-base sm:text-lg font-semibold leading-none whitespace-nowrap transition-all duration-300 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:-translate-y-0.5";
+
+const ctaPrimaryClass = `${ctaBaseClass} bg-linear-to-r from-violet-600 to-purple-600 text-white shadow-lg shadow-violet-500/25 hover:from-violet-500 hover:to-purple-500 hover:shadow-xl hover:shadow-violet-500/40`;
+const ctaStudentClass = `${ctaBaseClass} bg-linear-to-r from-sky-600 to-blue-600 text-white shadow-lg shadow-sky-500/25 hover:from-sky-500 hover:to-blue-500 hover:shadow-xl hover:shadow-sky-500/40`;
+const ctaTeacherClass = `${ctaBaseClass} bg-linear-to-r from-emerald-600 to-teal-600 text-white shadow-lg shadow-emerald-500/25 hover:from-emerald-500 hover:to-teal-500 hover:shadow-xl hover:shadow-emerald-500/40`;
+const ctaDangerClass = `${ctaBaseClass} bg-linear-to-r from-rose-600 to-red-600 text-white shadow-lg shadow-rose-500/25 hover:from-rose-500 hover:to-red-500 hover:shadow-xl hover:shadow-rose-500/35`;
+const ctaGhostClass = `${ctaBaseClass} glass border border-border text-foreground hover:bg-accent/80 shadow-lg`;
+
 export default function Landing() {
-  const { currentUser } = useAuth();
+  return (
+    <Suspense fallback={<LoadingFallback />}>
+      <LandingContent />
+    </Suspense>
+  );
+}
+
+function LoadingFallback() {
+  return (
+    <div className="min-h-screen flex items-center justify-center">
+      <motion.div
+        animate={{ rotate: 360 }}
+        transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
+        className="w-12 h-12 border-4 border-violet-300 border-t-violet-600 rounded-full"
+      />
+    </div>
+  );
+}
+
+function LandingContent() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const { currentUser, currentStudent, currentTeacher, loading } = useAuth();
+  const { logoutStudent, logoutTeacher } = useAuthStore();
   const featuresRef = useRef(null);
   const isInView = useInView(featuresRef, { once: true, margin: "-100px" });
+
+  // Check for join parameter and redirect if not logged in
+  useEffect(() => {
+    const joinCode = searchParams.get("join");
+    if (joinCode && !currentStudent && !currentTeacher && !currentUser) {
+      router.push(`/student-login?join=${joinCode}`);
+    }
+  }, [searchParams, currentStudent, currentTeacher, currentUser, router]);
+
+  // Determine what to show based on login state
+  const isStudentLoggedIn = !!currentStudent;
+  const isTeacherLoggedIn = !!currentTeacher;
+
+  const handleStudentLogout = () => {
+    logoutStudent();
+  };
+
+  const handleTeacherLogout = () => {
+    logoutTeacher();
+  };
 
   return (
     <div className="min-h-screen home-page">
@@ -127,25 +181,80 @@ export default function Landing() {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.5, delay: 0.4 }}
-            className="flex flex-col sm:flex-row gap-4 justify-center items-center"
+            className="flex w-full flex-wrap gap-4 justify-center items-center"
           >
-            {currentUser ? (
-              <Link href="/dashboard">
-                <button className="px-10 py-4 rounded-full font-semibold text-lg bg-gradient-to-r from-violet-600 to-purple-600 text-white hover:from-violet-700 hover:to-purple-700 transition-all shadow-lg hover:shadow-xl hover:shadow-violet-500/25">
-                  Go to Dashboard
-                  <ArrowRight className="inline ml-2 w-5 h-5" />
+            {/* Show loading state */}
+            {loading ? (
+              <div className="inline-flex h-14 min-w-52 items-center justify-center rounded-full px-8 font-semibold text-base sm:text-lg text-muted-foreground glass border border-border">
+                Loading...
+              </div>
+            ) : currentUser ? (
+              /* Firebase User (existing auth) */
+              <>
+                <Link href="/dashboard">
+                  <button className={ctaPrimaryClass}>
+                    Go to Dashboard
+                    <ArrowRight className="w-5 h-5 shrink-0" />
+                  </button>
+                </Link>
+              </>
+            ) : isStudentLoggedIn ? (
+              /* Student logged in via localStorage */
+              <>
+                <Link href="/dashboard">
+                  <button className={ctaPrimaryClass}>
+                    Continue Learning
+                    <ArrowRight className="w-5 h-5 shrink-0" />
+                  </button>
+                </Link>
+                <button
+                  onClick={handleStudentLogout}
+                  className={ctaDangerClass}
+                >
+                  Student Logout
                 </button>
-              </Link>
+              </>
+            ) : isTeacherLoggedIn ? (
+              /* Teacher logged in via localStorage */
+              <>
+                <Link href="/teacher-dashboard">
+                  <button className={ctaTeacherClass}>
+                    View Dashboard
+                    <ArrowRight className="w-5 h-5 shrink-0" />
+                  </button>
+                </Link>
+                <button
+                  onClick={handleTeacherLogout}
+                  className={ctaDangerClass}
+                >
+                  Teacher Logout
+                </button>
+              </>
             ) : (
-              <Link href="/login">
-                <button className="px-10 py-4 rounded-full font-semibold text-lg bg-gradient-to-r from-violet-600 to-purple-600 text-white hover:from-violet-700 hover:to-purple-700 transition-all shadow-lg hover:shadow-xl hover:shadow-violet-500/25">
-                  Try NeuroLex Now
-                  <ArrowRight className="inline ml-2 w-5 h-5" />
-                </button>
-              </Link>
+              /* Not logged in - show all login options */
+              <>
+                <Link href="/login">
+                  <button className={ctaPrimaryClass}>
+                    Try NeuroLex Now
+                    <ArrowRight className="w-5 h-5 shrink-0" />
+                  </button>
+                </Link>
+                <Link href="/student-login">
+                  <button className={ctaStudentClass}>
+                    Student Login
+                    <ArrowRight className="w-5 h-5 shrink-0" />
+                  </button>
+                </Link>
+                <Link href="/teacher-login">
+                  <button className={ctaTeacherClass}>
+                    Teacher Login
+                    <ArrowRight className="w-5 h-5 shrink-0" />
+                  </button>
+                </Link>
+              </>
             )}
             <a href="#features">
-              <button className="px-10 py-4 rounded-full font-semibold text-lg glass border border-border text-foreground hover:bg-accent transition-all">
+              <button className={ctaGhostClass}>
                 Learn More
               </button>
             </a>
@@ -190,7 +299,7 @@ export default function Landing() {
                   className={`mb-5 flex justify-center`}
                 >
                   <div
-                    className={`p-3 rounded-xl bg-gradient-to-br ${f.gradient} shadow-lg`}
+                    className={`p-3 rounded-xl bg-linear-to-br ${f.gradient} shadow-lg`}
                   >
                     <f.icon className="w-8 h-8 text-white" />
                   </div>
@@ -243,7 +352,7 @@ export default function Landing() {
                       {member.role}
                     </p>
                   </div>
-                  <div className={`h-3 w-20 rounded-full bg-gradient-to-r ${member.accent}`} />
+                  <div className={`h-3 w-20 rounded-full bg-linear-to-r ${member.accent}`} />
                 </div>
 
                 <p className="text-sm md:text-base text-muted-foreground mb-2">{member.focus}</p>
@@ -305,10 +414,10 @@ export default function Landing() {
               <motion.button
                 whileHover={{ scale: 1.05 }}
                 whileTap={{ scale: 0.95 }}
-                className="px-10 py-4 rounded-full font-semibold text-lg bg-gradient-to-r from-violet-600 to-purple-600 text-white hover:from-violet-700 hover:to-purple-700 transition-all shadow-lg hover:shadow-xl hover:shadow-violet-500/25"
+                className={ctaPrimaryClass}
               >
                 Try NeuroLex
-                <ArrowRight className="inline ml-2 w-5 h-5" />
+                <ArrowRight className="w-5 h-5 shrink-0" />
               </motion.button>
             </Link>
           </motion.div>

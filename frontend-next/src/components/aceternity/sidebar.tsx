@@ -84,10 +84,11 @@ export const DesktopSidebar = ({
   ...props
 }: React.ComponentProps<typeof motion.div>) => {
   const { open, setOpen, animate } = useSidebar();
+
   return (
     <motion.div
       className={cn(
-        "relative z-40 h-full px-4 py-4 hidden md:flex md:flex-col w-75 shrink-0",
+        "relative z-40 h-full px-4 py-4 hidden md:flex md:flex-col w-17 shrink-0",
         "glass border-r border-border",
         className
       )}
@@ -95,10 +96,14 @@ export const DesktopSidebar = ({
         width: animate ? (open ? "300px" : "68px") : "300px",
       }}
       transition={{ duration: 0.3, ease: "easeInOut" }}
-      onPointerEnter={() => setOpen(true)}
-      onPointerLeave={() => setOpen(false)}
       onMouseEnter={() => setOpen(true)}
       onMouseLeave={() => setOpen(false)}
+      onFocusCapture={() => setOpen(true)}
+      onBlurCapture={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+          setOpen(false);
+        }
+      }}
       {...props}
     >
       {children}
@@ -198,6 +203,8 @@ export const SidebarLink = ({
   props?: LinkProps;
 }) => {
   const { open, setOpen, animate } = useSidebar();
+  const showLabel = !animate || open;
+
   return (
     <Link
       href={link.href}
@@ -207,7 +214,8 @@ export const SidebarLink = ({
         }
       }}
       className={cn(
-        "flex items-center justify-start gap-2 group/sidebar py-2 px-2 rounded-lg transition-colors duration-200",
+        "flex items-center group/sidebar py-2 px-2 rounded-lg transition-colors duration-200",
+        animate && !open ? "justify-center" : "justify-start gap-2",
         active
           ? "bg-primary/10 text-primary"
           : "text-muted-foreground hover:text-foreground hover:bg-accent",
@@ -216,16 +224,20 @@ export const SidebarLink = ({
       {...props}
     >
       <span className="shrink-0">{link.icon}</span>
-      <motion.span
-        animate={{
-          display: animate ? (open ? "inline-block" : "none") : "inline-block",
-          opacity: animate ? (open ? 1 : 0) : 1,
-        }}
-        transition={{ duration: 0.2 }}
-        className="text-sm font-semibold whitespace-pre group-hover/sidebar:translate-x-1 transition duration-150"
-      >
-        {link.label}
-      </motion.span>
+      <AnimatePresence initial={false}>
+        {showLabel && (
+          <motion.span
+            key={link.href}
+            initial={{ opacity: 0, x: -6 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -6 }}
+            transition={{ duration: 0.18, ease: "easeOut" }}
+            className="text-sm font-semibold whitespace-nowrap overflow-hidden group-hover/sidebar:translate-x-1 transition duration-150"
+          >
+            {link.label}
+          </motion.span>
+        )}
+      </AnimatePresence>
     </Link>
   );
 };

@@ -62,10 +62,7 @@ const DIRECTIONS = [
 ];
 
 export default function InhibitionStroop() {
-  const [difficulty, setDifficulty] = useState(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    return saved ? Math.max(1, Math.min(5, Number(saved))) : 1;
-  });
+  const [difficulty, setDifficulty] = useState(1);
   const [phase, setPhase] = useState("ready");
   const [items, setItems] = useState<any[]>([]);
   const [current, setCurrent] = useState(0);
@@ -81,6 +78,15 @@ export default function InhibitionStroop() {
 
   const config = useMemo(() => getDifficultyConfig("stroop", difficulty), [difficulty]);
   const session = useGameSession("stroop", "test-user");
+
+  // Load saved difficulty from localStorage
+  useEffect(() => {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      const savedDiff = Math.max(1, Math.min(5, Number(saved)));
+      setDifficulty(savedDiff);
+    }
+  }, []);
 
   const wordCount = config.wordCount || 10;
   const timeLimit = config.timeLimit || 0;
