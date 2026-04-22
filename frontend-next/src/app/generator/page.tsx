@@ -159,14 +159,22 @@ function GeneratorPageInner() {
             }
 
             const data = await response.json();
-            setOutputs(data);
+            const normalizedData = {
+                ...data,
+                simplifiedNotes: data?.simplifiedNotes ?? data?.NeuroLexNotes ?? '',
+                flashcards: data?.flashcards ?? '',
+                quiz: data?.quiz ?? '',
+                mindMap: data?.mindMap ?? data?.mindmap ?? '',
+            };
+
+            setOutputs(normalizedData);
             setActiveTab('notes');
 
             // Track content generation in Firebase
             if (user?.uid) {
                 logContentGeneration(user.uid, {
                     inputLength: inputText.length,
-                    types: Object.keys(data).filter(k => data[k]),
+                    types: Object.keys(normalizedData).filter(k => normalizedData[k]),
                 });
             }
         } catch (err: any) {
@@ -261,8 +269,8 @@ function GeneratorPageInner() {
                                 rows={10}
                                 placeholder="Paste lecture notes, textbook content, or any educational text..."
                                 className={`w-full rounded-xl p-4 bg-white/10 backdrop-blur-md border text-foreground placeholder-foreground/30 focus:outline-none resize-none transition-colors ${textError
-                                        ? 'border-red-500/70 focus:border-red-500'
-                                        : 'border-white/10 focus:border-amber-500'
+                                    ? 'border-red-500/70 focus:border-red-500'
+                                    : 'border-white/10 focus:border-amber-500'
                                     }`}
                                 style={{ fontSize: '16px', lineHeight: '1.6' }}
                             />

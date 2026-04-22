@@ -55,6 +55,10 @@ export async function getLatestLecture(userId) {
   try {
     const response = await fetch(`${API_BASE_URL}/lectures/user/${userId}/latest`);
 
+    if (response.status === 404) {
+      return null;
+    }
+
     if (!response.ok) {
       throw new Error(`Failed to get latest lecture: ${response.statusText}`);
     }
@@ -139,6 +143,10 @@ export async function deleteLecture(lectureId) {
 export async function getUserLectures(userId) {
   try {
     const response = await fetch(`${API_BASE_URL}/lectures/user/${userId}`);
+
+    if (response.status === 404) {
+      return [];
+    }
 
     if (!response.ok) {
       throw new Error(`Failed to get user lectures: ${response.statusText}`);

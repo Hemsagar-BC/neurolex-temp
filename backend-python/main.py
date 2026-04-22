@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from typing import Optional
 import firebase_admin
 from firebase_admin import credentials, firestore
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 from dotenv import load_dotenv
 import requests
@@ -240,6 +240,102 @@ def chunk_text(text: str, max_chunk_size: int = 500) -> list:
     
     return chunks
 
+
+def _normalize_text(text: str) -> str:
+    """Collapse repeated whitespace and trim text."""
+    return " ".join((text or "").split()).strip()
+
+
+def _split_sentences(text: str) -> list:
+    """Split plain text into simple sentence-like chunks."""
+    normalized = _normalize_text(text)
+    if not normalized:
+        return []
+    parts = re.split(r'(?<=[.!?])\s+', normalized)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _syllable_break_word(word: str) -> str:
+    """Very lightweight syllable-style splitter for fallback output."""
+    clean = re.sub(r'[^A-Za-z]', '', word)
+    if len(clean) <= 6:
+        return word
+
+    chunks = []
+    current = ""
+    vowels = "aeiouyAEIOUY"
+    for index, ch in enumerate(clean):
+        current += ch
+        next_char = clean[index + 1] if index + 1 < len(clean) else ""
+        if ch in vowels and next_char and next_char not in vowels:
+            chunks.append(current)
+            current = ""
+
+    if current:
+        chunks.append(current)
+
+    if len(chunks) <= 1:
+        chunks = [clean[i:i + 3] for i in range(0, len(clean), 3)]
+
+    return "-".join(chunks)
+
+
+def fallback_breakdown_text(transcription: str) -> str:
+    words = transcription.split()
+    transformed = [_syllable_break_word(word) for word in words]
+    return " ".join(transformed).strip() or _normalize_text(transcription)
+
+
+def fallback_detailed_steps(transcription: str) -> str:
+    sentences = _split_sentences(transcription)
+    if not sentences:
+        return "1. Review the main lecture topic.\n2. Practice with short examples.\n3. Revise key terms."
+
+    limited = sentences[:6]
+    steps = [f"{index + 1}. {sentence}" for index, sentence in enumerate(limited)]
+    return "\n".join(steps)
+
+
+def fallback_mind_map(transcription: str) -> str:
+    sentences = _split_sentences(transcription)
+    topic_source = sentences[0] if sentences else _normalize_text(transcription)
+    topic_words = topic_source.split()
+    topic = " ".join(topic_words[:6]).strip() or "Lecture Topic"
+
+    points_source = sentences[1:5] if len(sentences) > 1 else [topic_source]
+    points = [re.sub(r'\s+', ' ', p).strip()[:80] for p in points_source if p.strip()]
+    while len(points) < 3:
+        points.append("Review examples")
+
+    return "\n".join([
+        topic,
+        f"|- {points[0]}",
+        f"|- {points[1]}",
+        f"`- {points[2]}",
+    ])
+
+
+def fallback_summary(transcription: str) -> str:
+    sentences = _split_sentences(transcription)
+    if not sentences:
+        return "Summary unavailable. Please review the transcription and try processing again."
+
+    if len(sentences) == 1:
+        return sentences[0][:240]
+
+    return f"{sentences[0]} {sentences[1]}"[:320]
+
+
+def safe_generate_with_fallback(prompt: str, system: str, fallback_value: str, label: str, errors: list) -> str:
+    """Try Gemini generation and fall back to deterministic output when unavailable."""
+    try:
+        return generate_with_gemini(prompt, system)
+    except Exception as exc:
+        error_msg = f"{label}: {str(exc)}"
+        errors.append(error_msg)
+        print(f"[WARN] Using fallback for {label}. Reason: {exc}")
+        return fallback_value
+
 def _throttle_gemini():
     """Ensure minimum interval between Gemini API calls to respect rate limits."""
     global _last_gemini_call
@@ -363,15 +459,45 @@ async def get_lecture(lecture_id: str):
 async def get_latest_lecture(user_id: str):
     """Get the latest lecture for a user"""
     try:
-        docs = db.collection("lectures")\
-            .where("userId", "==", user_id)\
-            .order_by("createdAt", direction=firestore.Query.DESCENDING)\
-            .limit(1)\
-            .stream()
-        
-        for doc in docs:
-            data = doc.to_dict()
-            return {"id": doc.id, **data}
+        # Prefer server-side ordering for performance, but gracefully fallback if
+        # the required composite index is missing.
+        try:
+            docs = db.collection("lectures")\
+                .where("userId", "==", user_id)\
+                .order_by("createdAt", direction=firestore.Query.DESCENDING)\
+                .limit(1)\
+                .stream()
+            for doc in docs:
+                data = doc.to_dict()
+                return {"id": doc.id, **data}
+        except Exception as query_error:
+            if "requires an index" not in str(query_error).lower():
+                raise
+
+            docs = db.collection("lectures")\
+                .where("userId", "==", user_id)\
+                .stream()
+
+            latest_doc = None
+            latest_created_at = float("-inf")
+
+            for doc in docs:
+                data = doc.to_dict() or {}
+                created_at = data.get("createdAt")
+                if isinstance(created_at, datetime):
+                    if created_at.tzinfo is None:
+                        created_at = created_at.replace(tzinfo=timezone.utc)
+                    created_at_value = created_at.timestamp()
+                else:
+                    created_at_value = float("-inf")
+
+                if created_at_value >= latest_created_at:
+                    latest_created_at = created_at_value
+                    latest_doc = doc
+
+            if latest_doc is not None:
+                data = latest_doc.to_dict() or {}
+                return {"id": latest_doc.id, **data}
         
         raise HTTPException(status_code=404, detail="No lectures found")
     except HTTPException:
@@ -396,12 +522,7 @@ async def process_lecture(lecture_id: str):
         
         print(f"[START] Processing lecture {lecture_id}...")
         start_time = time.time()
-        
-        # Chunk the transcription for faster processing
-        chunks = chunk_text(transcription, max_chunk_size=600)
-        print(f"[INFO] Split into {len(chunks)} chunks for processing")
-        
-        from concurrent.futures import ThreadPoolExecutor
+        generation_errors = []
         
         # OPTIMIZED PROMPTS - SHORTER = FASTER
         breakdown_prompt = f"""Break down by splitting words into syllables with hyphens. Keep sentences intact.
@@ -440,36 +561,41 @@ Text:
 
 Summary:"""
         
-        print("[PROC] Starting parallel processing of 4 outputs...")
-        
-        # Use ThreadPoolExecutor for parallel processing (simpler, no asyncio issues)
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            breakdown_future = executor.submit(
-                generate_with_gemini, 
-                breakdown_prompt,
-                "Break words into syllables. Output only the result."
-            )
-            steps_future = executor.submit(
-                generate_with_gemini,
-                steps_prompt,
-                "Create numbered steps. Be concise."
-            )
-            mindmap_future = executor.submit(
-                generate_with_gemini,
-                mindmap_prompt,
-                "Create a brief mind map. Keep it very short."
-            )
-            summary_future = executor.submit(
-                generate_with_gemini,
-                summary_prompt,
-                "Write a 2-3 sentence summary."
-            )
-            
-            # Wait for all to complete
-            breakdown_text = breakdown_future.result()
-            detailed_steps = steps_future.result()
-            mind_map = mindmap_future.result()
-            summary = summary_future.result()
+        print("[PROC] Processing outputs with Gemini + fallback...")
+
+        fallback_breakdown = fallback_breakdown_text(transcription)
+        fallback_steps = fallback_detailed_steps(transcription)
+        fallback_mindmap = fallback_mind_map(transcription)
+        fallback_summary_text = fallback_summary(transcription)
+
+        breakdown_text = safe_generate_with_fallback(
+            breakdown_prompt,
+            "Break words into syllables. Output only the result.",
+            fallback_breakdown,
+            "simpleText",
+            generation_errors,
+        )
+        detailed_steps = safe_generate_with_fallback(
+            steps_prompt,
+            "Create numbered steps. Be concise.",
+            fallback_steps,
+            "detailedSteps",
+            generation_errors,
+        )
+        mind_map = safe_generate_with_fallback(
+            mindmap_prompt,
+            "Create a brief mind map. Keep it very short.",
+            fallback_mindmap,
+            "mindMap",
+            generation_errors,
+        )
+        summary = safe_generate_with_fallback(
+            summary_prompt,
+            "Write a 2-3 sentence summary.",
+            fallback_summary_text,
+            "summary",
+            generation_errors,
+        )
         
         elapsed_time = time.time() - start_time
         print(f"[DONE] Processing complete in {elapsed_time:.1f} seconds!")
@@ -481,7 +607,9 @@ Summary:"""
             "mindMap": mind_map,
             "summary": summary,
             "updatedAt": datetime.now(),
-            "processingTime": elapsed_time
+            "processingTime": elapsed_time,
+            "processingFallbackUsed": len(generation_errors) > 0,
+            "processingErrors": generation_errors,
         }
         
         db.collection("lectures").document(lecture_id).update(update_data)
@@ -493,7 +621,9 @@ Summary:"""
             "detailedSteps": detailed_steps,
             "mindMap": mind_map,
             "summary": summary,
-            "processingTime": elapsed_time
+            "processingTime": elapsed_time,
+            "usedFallback": len(generation_errors) > 0,
+            "errors": generation_errors,
         }
         
     except HTTPException:
@@ -530,15 +660,38 @@ async def delete_lecture(lecture_id: str):
 async def get_user_lectures(user_id: str):
     """Get all lectures for a user"""
     try:
-        docs = db.collection("lectures")\
-            .where("userId", "==", user_id)\
-            .order_by("createdAt", direction=firestore.Query.DESCENDING)\
-            .stream()
-        
         lectures = []
-        for doc in docs:
-            data = doc.to_dict()
-            lectures.append({"id": doc.id, **data})
+
+        try:
+            docs = db.collection("lectures")\
+                .where("userId", "==", user_id)\
+                .order_by("createdAt", direction=firestore.Query.DESCENDING)\
+                .stream()
+
+            for doc in docs:
+                data = doc.to_dict()
+                lectures.append({"id": doc.id, **data})
+        except Exception as query_error:
+            if "requires an index" not in str(query_error).lower():
+                raise
+
+            docs = db.collection("lectures")\
+                .where("userId", "==", user_id)\
+                .stream()
+
+            for doc in docs:
+                data = doc.to_dict() or {}
+                lectures.append({"id": doc.id, **data})
+
+            def _lecture_created_at_sort_key(lecture):
+                created_at = lecture.get("createdAt")
+                if not isinstance(created_at, datetime):
+                    return float("-inf")
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=timezone.utc)
+                return created_at.timestamp()
+
+            lectures.sort(key=_lecture_created_at_sort_key, reverse=True)
         
         return lectures
     except Exception as e:

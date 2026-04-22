@@ -59,7 +59,7 @@ const features = [
 
 const teamMembers = [
   {
-    name: "Pushkar R Deshpande",
+    name: "Abhishek Holla",
     role: "Team Lead and Frontend Developer",
     focus: "UI and Product Experience",
     college: "4th Sem EIE, BIT Bangalore",

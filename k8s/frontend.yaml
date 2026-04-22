@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neurolex-frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: neurolex-frontend
+  template:
+    metadata:
+      labels:
+        app: neurolex-frontend
+    spec:
+      containers:
+        - name: neurolex-frontend
+          image: neurolex-frontend:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: BACKEND_API_URL
+              value: "http://neurolex-backend:8001/api"
+          ports:
+            - containerPort: 3000
+          resources:
+            limits:
+              memory: "256Mi"
+              cpu: "250m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: neurolex-frontend
+spec:
+  type: ClusterIP
+  selector:
+    app: neurolex-frontend
+  ports:
+    - protocol: TCP
+      port: 3000
+      targetPort: 3000

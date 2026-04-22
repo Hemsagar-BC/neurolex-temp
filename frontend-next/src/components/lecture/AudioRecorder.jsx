@@ -15,6 +15,17 @@ export default function AudioRecorder({ onRecordingComplete, onTranscriptionUpda
   const [isListening, setIsListening] = useState(false);
   const recognitionRef = useRef(null);
   const accumulatedTranscriptRef = useRef(''); // Store accumulated text across restarts
+  const latestTranscriptRef = useRef('');
+  const isRecordingRef = useRef(false);
+  const isListeningRef = useRef(false);
+
+  useEffect(() => {
+    isRecordingRef.current = isRecording;
+  }, [isRecording]);
+
+  useEffect(() => {
+    isListeningRef.current = isListening;
+  }, [isListening]);
 
   // Initialize Web Speech API
   useEffect(() => {
@@ -57,8 +68,9 @@ export default function AudioRecorder({ onRecordingComplete, onTranscriptionUpda
         }
 
         // Combine accumulated + interim for display
-        const fullTranscript = accumulatedTranscriptRef.current + interimTranscript;
-        setTranscription(accumulatedTranscriptRef.current);
+        const fullTranscript = (accumulatedTranscriptRef.current + interimTranscript).trim();
+        latestTranscriptRef.current = fullTranscript;
+        setTranscription(fullTranscript);
 
         // Send live updates to parent
         if (onTranscriptionUpdate) {
@@ -92,12 +104,12 @@ export default function AudioRecorder({ onRecordingComplete, onTranscriptionUpda
       };
 
       recognitionRef.current.onend = () => {
-        console.log('🔄 Speech recognition ended. IsRecording:', isRecording, 'IsListening:', isListening);
+        console.log('🔄 Speech recognition ended. IsRecording:', isRecordingRef.current, 'IsListening:', isListeningRef.current);
 
         // Auto-restart if still recording (with delay to prevent rapid restarts)
-        if (isListening && isRecording) {
+        if (isListeningRef.current && isRecordingRef.current) {
           setTimeout(() => {
-            if (isListening && isRecording && recognitionRef.current) {
+            if (isListeningRef.current && isRecordingRef.current && recognitionRef.current) {
               try {
                 recognitionRef.current.start();
                 console.log('✅ Speech recognition restarted');
@@ -110,6 +122,7 @@ export default function AudioRecorder({ onRecordingComplete, onTranscriptionUpda
             }
           }, 300); // 300ms delay for mobile compatibility
         } else {
+          isListeningRef.current = false;
           setIsListening(false);
         }
       };
@@ -127,7 +140,7 @@ export default function AudioRecorder({ onRecordingComplete, onTranscriptionUpda
     }
 
     return () => {
-      if (recognitionRef.current && isListening) {
+      if (recognitionRef.current) {
         try {
           recognitionRef.current.stop();
         } catch (e) {
@@ -135,13 +148,14 @@ export default function AudioRecorder({ onRecordingComplete, onTranscriptionUpda
         }
       }
     };
-  }, [transcription, onTranscriptionUpdate, isListening, isRecording]);
+  }, [onTranscriptionUpdate]);
 
   // Handle start recording
   const handleStartRecording = async () => {
     // Clear transcription immediately (no delay)
     setTranscription('');
     accumulatedTranscriptRef.current = '';
+    latestTranscriptRef.current = '';
 
     // Notify parent to clear live transcription display immediately
     if (onTranscriptionUpdate) {
@@ -168,6 +182,7 @@ export default function AudioRecorder({ onRecordingComplete, onTranscriptionUpda
 
           // Small delay then start
           setTimeout(() => {
+            isListeningRef.current = true;
             setIsListening(true);
             recognitionRef.current.start();
             console.log('🎤 Speech recognition started - speak clearly into your microphone');
@@ -176,6 +191,7 @@ export default function AudioRecorder({ onRecordingComplete, onTranscriptionUpda
         } catch (e) {
           console.error('❌ Could not start speech recognition:', e.message);
           alert('Speech recognition unavailable. Your speech won\'t be transcribed, but audio will be recorded. You can add text manually later.');
+          isListeningRef.current = false;
           setIsListening(false);
         }
       }, 300); // Increased delay for mobile compatibility
@@ -183,8 +199,10 @@ export default function AudioRecorder({ onRecordingComplete, onTranscriptionUpda
   };
   // Handle stop recording
   const handleStopRecording = () => {
+    isListeningRef.current = false;
     setIsListening(false);
 
+    // Give recognition a brief moment to flush final transcript before stopping recorder.
     if (recognitionRef.current) {
       try {
         recognitionRef.current.stop();
@@ -193,7 +211,9 @@ export default function AudioRecorder({ onRecordingComplete, onTranscriptionUpda
       }
     }
 
-    stopRecording();
+    setTimeout(() => {
+      stopRecording();
+    }, 250);
 
     // Notify parent that recording has stopped
     if (onRecordingStateChange) {
@@ -206,10 +226,11 @@ export default function AudioRecorder({ onRecordingComplete, onTranscriptionUpda
   // When recording stops and audioBlob is ready, pass it to parent
   useEffect(() => {
     if (audioBlob && onRecordingComplete) {
-      onRecordingComplete(audioBlob, transcription);
+      const finalTranscript = (latestTranscriptRef.current || accumulatedTranscriptRef.current || transcription || '').trim();
+      onRecordingComplete(audioBlob, finalTranscript);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [audioBlob, transcription]);
+  }, [audioBlob, onRecordingComplete, transcription]);
 
   // Format duration as MM:SS
   const formatDuration = (seconds) => {
@@ -251,7 +272,7 @@ export default function AudioRecorder({ onRecordingComplete, onTranscriptionUpda
           focus:outline-none focus:ring-4 focus:ring-blue-500/50 touch-target
           ${isRecording
             ? 'bg-red-600 animate-pulse shadow-lg shadow-red-600/50'
-            : 'bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 shadow-lg'
+            : 'bg-linear-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 shadow-lg'
           }
         `}
       >
