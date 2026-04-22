@@ -36,10 +36,7 @@ function generateSequence(gridSize: number, n: number, totalRounds: number) {
 }
 
 export default function NBackChallenge() {
-  const [difficulty, setDifficulty] = useState(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    return saved ? Math.max(1, Math.min(5, Number(saved))) : 1;
-  });
+  const [difficulty, setDifficulty] = useState(1);
   const [phase, setPhase] = useState("ready");
   const [round, setRound] = useState(0);
   const [activeCell, setActiveCell] = useState(-1);
@@ -64,6 +61,15 @@ export default function NBackChallenge() {
   const gridSize = config.gridSize;
   const intervalMs = config.intervalMs;
   const showHints = difficulty <= 2;
+
+  // Load saved difficulty from localStorage
+  useEffect(() => {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      const savedDiff = Math.max(1, Math.min(5, Number(saved)));
+      setDifficulty(savedDiff);
+    }
+  }, []);
 
   const startGame = useCallback(async () => {
     const { sequence, matchSet } = generateSequence(gridSize, n, TOTAL_ROUNDS);

@@ -75,10 +75,7 @@ const STORAGE_KEY = "sound_builder_difficulty";
 const TOTAL_ROUNDS = 10;
 
 export default function SoundBuilder() {
-  const [difficulty, setDifficulty] = useState(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    return saved ? Math.max(1, Math.min(5, Number(saved))) : 1;
-  });
+  const [difficulty, setDifficulty] = useState(1);
   const [phase, setPhase] = useState("ready");
   const [rounds, setRounds] = useState<any[]>([]);
   const [current, setCurrent] = useState(0);
@@ -92,6 +89,15 @@ export default function SoundBuilder() {
 
   const config = useMemo(() => getDifficultyConfig("sound_builder", difficulty), [difficulty]);
   const session = useGameSession("sound_builder", "test-user");
+
+  // Load saved difficulty from localStorage
+  useEffect(() => {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      const savedDiff = Math.max(1, Math.min(5, Number(saved)));
+      setDifficulty(savedDiff);
+    }
+  }, []);
 
   const generateRounds = useCallback(() => {
     const maxLen = config.wordLength || 4;

@@ -380,10 +380,13 @@ const PUZZLES_PER_SESSION = 5;
 
 export default function DotConnector() {
   const storageKey = "dot_connector_difficulty";
-  const [difficulty, setDifficulty] = useState(
-    () => Number(localStorage.getItem(storageKey)) || 1
-  );
+  const [difficulty, setDifficulty] = useState(1);
   const config = getDifficultyConfig(GAME_TYPE, difficulty);
+
+  useEffect(() => {
+    const savedDifficulty = Number(localStorage.getItem(storageKey)) || 1;
+    setDifficulty(savedDifficulty);
+  }, [storageKey]);
 
   const [phase, setPhase] = useState("ready"); // ready | playing | celebrate | result
   const [puzzleIndex, setPuzzleIndex] = useState(0);

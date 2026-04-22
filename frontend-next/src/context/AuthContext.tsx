@@ -3,9 +3,12 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { onAuthStateChanged, signOut, User } from 'firebase/auth';
 import { auth } from "@/lib/firebase";
+import { useAuthStore, type Student, type Teacher } from "@/stores/authStore";
 
 interface AuthContextType {
   currentUser: User | null;
+  currentStudent: Student | null;
+  currentTeacher: Teacher | null;
   loading: boolean;
   logout: () => Promise<void>;
 }
@@ -17,16 +20,21 @@ const AuthContext = createContext<AuthContextType | null>(null);
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const { currentStudent, currentTeacher, loadFromLocalStorage } = useAuthStore();
 
-  // Set up listener for auth state changes
+  // Set up listener for auth state changes + load localStorage
   useEffect(() => {
+    // Load localStorage auth data
+    loadFromLocalStorage();
+
+    // Set up Firebase listener
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       setCurrentUser(user);
       setLoading(false);
     });
 
     return unsubscribe;
-  }, []);
+  }, [loadFromLocalStorage]);
 
   // Sign out function
   const logout = async () => {
@@ -40,13 +48,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const value = {
     currentUser,
+    currentStudent,
+    currentTeacher,
     loading,
     logout,
   };
 
   return (
     <AuthContext.Provider value={value}>
-      {!loading && children}
+      {children}
     </AuthContext.Provider>
   );
 }
