@@ -55,6 +55,16 @@ const GAMES = [
     path: '/games/stroop',
     tag: 'Focus',
   },
+  // {
+  //   id: 'FFFF',
+  //   title: 'Little Blitz',
+  //   emoji: '👏',
+  //   description: 'Feel the rhythm — clap on the beat to build timing skills.',
+  //   gradient: 'from-rose-500/30 to-pink-600/30',
+  //   border: 'border-rose-400/30 hover:border-rose-400/60',
+  //   path: '/games/gesture-ninja',
+  //   tag: 'Rhythm',
+  // },
 ];
 
 const container = {
